@@ -11,6 +11,8 @@ add_executable(IPGui ng.cpp appicon.rc)
 
 target_link_libraries(IPGui PRIVATE Qt6::Widgets Qt6::Network)  # Link Network
 
+set_target_properties(IPGui PROPERTIES WIN32_EXECUTABLE TRUE)
+
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)

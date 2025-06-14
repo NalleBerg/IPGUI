@@ -1,0 +1,10 @@
+^C:\USERS\NALLE\DOCUMENTS\C++\WORKSPACE\IPGUI\BUILD\CMAKEFILES\460D1B1A393C7C6EDFE12AE6DA79F278\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/nalle/Documents/C++/Workspace/IPGUI -BC:/Users/nalle/Documents/C++/Workspace/IPGUI/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/nalle/Documents/C++/Workspace/IPGUI/build/NetUIQt.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

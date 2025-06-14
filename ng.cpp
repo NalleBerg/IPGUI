@@ -1,3 +1,13 @@
+// License: This project is licensed under the GNU General Public License v2.0 (GPL-2.0).
+// Project author: Nalle Berg
+// Project name: IPGui
+// Project description: A simple IP lookup/renew tool for Windows.
+// Project version: 1.0.0
+// Compiler: MSVC 19.29.30133.0
+// Target platform: Windows
+// Target architecture: x64
+// Build configuration: x64 Release
+
 #include <QApplication>
 #include <QMainWindow>
 #include <QLabel>
@@ -26,6 +36,8 @@
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 
+
+// Function to get the default gateway for a given IP address
 QString getDefaultGateway(const QString& ipAddress) {
     // Try Windows API first
     ULONG outBufLen = 15000;
@@ -96,6 +108,7 @@ QString getDefaultGateway(const QString& ipAddress) {
     return gateway;
 }
 
+// Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
@@ -129,14 +142,16 @@ int main(int argc, char *argv[]) {
         QNetworkReply *reply = manager.get(request);
         QEventLoop loop;
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-
+        // Set a timeout for the request
+        // If the request takes too long, we will set a default value
         QTimer timer;
         timer.setSingleShot(true);
         QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
         timer.start(3000);
 
         loop.exec();
-
+        // Check if the reply is finished and if there was no error
+        // If the reply is not finished, it means we timed out or there was an error
         if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
             externalIp = reply->readAll();
             if (externalIp.trimmed().isEmpty())
@@ -148,8 +163,11 @@ int main(int argc, char *argv[]) {
         }
         reply->deleteLater();
     }
-
+    // Get the adapter name (first non-loopback, non-virtual, up, running)
+    // This is a simple way to get the adapter name, but it may not be the most reliable
     QString adapterName;
+
+    
 for (const QNetworkInterface &iface : interfaces) {
     if (!(iface.flags() & QNetworkInterface::IsUp) || !(iface.flags() & QNetworkInterface::IsRunning) || (iface.flags() & QNetworkInterface::IsLoopBack))
         continue;
@@ -163,9 +181,9 @@ for (const QNetworkInterface &iface : interfaces) {
     }
     if (!ipAddress.isEmpty()) break;
 }
-
+    
     QMainWindow window;
-    window.setWindowTitle("NetGui");
+    window.setWindowTitle("IPGui");
 
     QWidget *centralWidget = new QWidget();
     QVBoxLayout *layout = new QVBoxLayout(centralWidget);
@@ -179,9 +197,9 @@ for (const QNetworkInterface &iface : interfaces) {
     "<div align='center'>"
         "<table border='0' cellpadding='6' cellspacing='0'>"
         "<tr><th align='left' style='color:#9a1321;'>Property</th><th align='left' style='color:#9a1321;'>Value</th></tr>"
-        "<tr><td><b>Adapter type</b></td><td style='color:blue;' align='center'>" + adapterName + "</td></tr>"
+        "<tr><td><b>Adapter Type</b></td><td style='color:blue;' align='center'>" + adapterName + "</td></tr>"
         "<tr><td><b>IP Address</b></td><td style='color:blue;' align='right'>" + ipAddress + "</td></tr>"
-        "<tr><td><b>Subnet</b></td><td style='color:blue;' align='right'>" + subnetMask + "</td></tr>"
+        "<tr><td><b>Subnet Mask</b></td><td style='color:blue;' align='right'>" + subnetMask + "</td></tr>"
         "<tr><td><b>Default Gateway</b></td><td style='color:blue;' align='right'>" + defaultGateway + "</td></tr>"
         "<tr><td><b>External Address</b></td><td style='color:blue;' align='right'>" + externalIp + "</td></tr>"
         "</table>"
@@ -190,9 +208,19 @@ for (const QNetworkInterface &iface : interfaces) {
     layout->addWidget(infoBox);
 
     // Buttons
+    // Create a horizontal layout for the buttons
     QHBoxLayout *buttonLayout = new QHBoxLayout();
     QPushButton *expandBtn = new QPushButton("Advanced");
     QPushButton *renewBtn = new QPushButton("Renew IP");
+
+    // Set tooltips (hover text)
+    expandBtn->setToolTip("Show advanced network details\nLike: «ipconfig /all»");
+    renewBtn->setToolTip("Renew your IP address (DHCP)");
+
+    // Make button text bold and give it color
+    QString boldStyle = "font-weight: bold; color: #595e12;";
+    expandBtn->setStyleSheet(boldStyle);
+    renewBtn->setStyleSheet(boldStyle);
     buttonLayout->addWidget(expandBtn);
     buttonLayout->addWidget(renewBtn);
     layout->addLayout(buttonLayout);
@@ -201,7 +229,8 @@ for (const QNetworkInterface &iface : interfaces) {
 
     // Toggle state for expand/collapse
     bool expanded = false;
-
+    
+    // Connect the expand/collapse button
     QObject::connect(expandBtn, &QPushButton::clicked, [&]() mutable {
     if (!expanded) {
         QProcess proc;
@@ -279,7 +308,7 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
     layout.addWidget(iconLabel, 0, Qt::AlignHCenter);
 
     QLabel label(
-        "<b>NetGui by Nalle Berg</b><br>"
+        "<b>IPGui by Nalle Berg</b><br>"
         "<b>Copyleft 2025</b><br><br>"
         "A simple IP lookup/renew -tool.<br>"
         "Visit my programming <a href='https://prog.nalle.no'> web page</a>.<br>"
