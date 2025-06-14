@@ -16,5 +16,7 @@ It is also capable of refreshing the IP address via DHCP.
 If you are not on internet you will get a warning, so it speeds up troubleshooting.
 
 Future plans:
+
 This application is finished!
-I might work on it later, but I have no plans as of now. This is a program that does one thing only.
+
+I might work on it later, but I have no plans as of now. This is a program that does one thing only - handle the IP address.
