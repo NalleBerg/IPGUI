@@ -55,7 +55,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.4.5";
+const QString VersionNumber = "2.4.6";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 
@@ -1342,7 +1342,7 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
 
     // Add icon (adjust path as needed)
     QLabel *iconLabel = new QLabel;
-    iconLabel->setPixmap(QPixmap("NSB-logo.png").scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    iconLabel->setPixmap(QPixmap("ip-address.png").scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     layout.addWidget(iconLabel, 0, Qt::AlignHCenter);
 
     QLabel label(
