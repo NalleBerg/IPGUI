@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(NetUIQt LANGUAGES CXX)
 
+# set(SQLITE3_DIR "./libs")
+
 set(CMAKE_CXX_STANDARD 17)
 
 set(CMAKE_PREFIX_PATH "C:/Qt/6.9.1/msvc2022_64/lib/cmake")
@@ -19,3 +21,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 target_link_libraries(IPGui PRIVATE iphlpapi ws2_32)
+
+# find_package(SQLite3 REQUIRED)
+# include_directories(${SQLite3_INCLUDE_DIRS})
+# target_link_libraries(IPGui PRIVATE SQLite3::SQLite3)

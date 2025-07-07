@@ -1,6 +1,25 @@
 @echo off
+REM Remove old build directory
 rmdir /s /q build
-cmake -S . -B build
-cmake --build build --verbose --config Debug
-C:\Qt\6.9.1\msvc2022_64\bin\windeployqt.exe --qmldir .\build\Debug .\build\Debug\IPGUI.exe
-.\build\Debug\IPGUI.exe
+
+REM Configure the project for Visual Studio 2022 x64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+REM Build in Release mode
+cmake --build build --config Release
+
+REM Deploy Qt dependencies
+C:\Qt\6.9.1\msvc2022_64\bin\windeployqt.exe  .\build\Release\IPGUI.exe
+
+
+REM Copying Standard Working gif to the build directory
+copy .\StdWorking.gif .\build\Release\StdWorking.gif
+
+REM Copying the port addresses for the port scanner.
+copy .\service-names-port-numbers.csv .\build\Release\service-names-port-numbers.csv
+
+REM Renaming the build/Release directory to IPGui
+ren .\build\Release IPGui
+
+REM Run the app
+.\build\IPGui\IPGUI.exe

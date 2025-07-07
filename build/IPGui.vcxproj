@@ -86,7 +86,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/VulkanSDK/1.4.313.1/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <ConformanceMode>true</ConformanceMode>
@@ -108,10 +108,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;QT_WIDGETS_LIB;QT_CORE_LIB;_ENABLE_EXTENDED_ALIGNED_STORAGE;WIN64;_WIN64;UNICODE;_UNICODE;QT_GUI_LIB;QT_NETWORK_LIB;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -134,7 +134,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/VulkanSDK/1.4.313.1/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <ConformanceMode>true</ConformanceMode>
@@ -157,10 +157,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;QT_WIDGETS_LIB;QT_CORE_LIB;QT_NO_DEBUG;_ENABLE_EXTENDED_ALIGNED_STORAGE;WIN64;_WIN64;UNICODE;_UNICODE;QT_GUI_LIB;QT_NETWORK_LIB;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -183,7 +183,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <ClCompile>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/VulkanSDK/1.4.313.1/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <ConformanceMode>true</ConformanceMode>
@@ -206,10 +206,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;QT_WIDGETS_LIB;QT_CORE_LIB;QT_NO_DEBUG;_ENABLE_EXTENDED_ALIGNED_STORAGE;WIN64;_WIN64;UNICODE;_UNICODE;QT_GUI_LIB;QT_NETWORK_LIB;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -232,7 +232,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <ClCompile>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtWidgets" /external:I "C:/Qt/6.9.1/msvc2022_64/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtCore" /external:I "C:/Qt/6.9.1/msvc2022_64/mkspecs/win32-msvc" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtGui" /external:I "C:/VulkanSDK/1.4.313.1/include" /external:I "C:/Qt/6.9.1/msvc2022_64/include/QtNetwork" -Zc:__cplusplus -utf-8</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <ConformanceMode>true</ConformanceMode>
@@ -254,10 +254,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;QT_WIDGETS_LIB;QT_CORE_LIB;QT_NO_DEBUG;_ENABLE_EXTENDED_ALIGNED_STORAGE;WIN64;_WIN64;UNICODE;_UNICODE;QT_GUI_LIB;QT_NETWORK_LIB;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Qt\6.9.1\msvc2022_64\include\QtWidgets;C:\Qt\6.9.1\msvc2022_64\include;C:\Qt\6.9.1\msvc2022_64\include\QtCore;C:\Qt\6.9.1\msvc2022_64\mkspecs\win32-msvc;C:\Qt\6.9.1\msvc2022_64\include\QtGui;C:\VulkanSDK\1.4.313.1\include;C:\Qt\6.9.1\msvc2022_64\include\QtNetwork;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
