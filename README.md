@@ -1,4 +1,4 @@
-Version 1.0.0
+Version 2.4.6
 
 Copyleft Nalle Berg 2025
 
