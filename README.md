@@ -1,10 +1,10 @@
-Version 2.4.6
+Version 2.5.0
 
 Copyleft Nalle Berg 2025
 
 License: GPL V2 - https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
-Homepage: https://prog.nalle.no
+Homepage: [https://prog.nalle.no](https://prog.nalle.no/nb/home/ipgui)
 
 Download installer: https://prog.nalle.no/ipgui/
 
