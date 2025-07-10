@@ -14,12 +14,22 @@ Earlier versions of Microsoft Windows included a simple graphical tool called **
 This is just a simple Graphic userinterface for ipconfig. It will show the most importnt IP addresses with a possibility for 
 «Advanced» mode showinw «ipconfig /all» in the window.
 
-It is also capable of releasing and refreshing the IP address via DHCP.
+It is also capable of releasing and refreshing the IP address via DHCP and also flush the DNS cache.
 
-If you are not on internet you will be told so, so it speeds up troubleshooting.
+In the «Action» menu you will find an «Always on top» selection. That lets your application lay over other active programs for comparing.
 
-Future plans:
+The menu also has a NetTools submenu containing:
+* Ping
+A simple interface for pinging hosts.
+* IP scanner
+To scan for devices on the local network.
+* NS Lookup
+To query Domain Name System (DNS) servers.
+* Traceroute
+To trace the route to a host.
+* PortScan
+It's a simple port-scanner to see which ports are open on your system or other hosts.
+* DHCP Status.
+Shows you lease time, time of expiry time and more
 
-This application is finished!
 
-I might work on it later, but I have no plans as of now. This is a program that does one thing only - handle the IP address.
