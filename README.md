@@ -1,4 +1,4 @@
-Version 1.0.0
+Version 2.4.6
 
 Copyleft Nalle Berg 2025
 
@@ -6,7 +6,7 @@ License: GPL V2 - https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
 Homepage: https://prog.nalle.no
 
-Download installer: https://prog.nalle.no/ipgui/apps/IPGui-1.0.0.msi
+Download installer: https://prog.nalle.no/ipgui/
 
 ### Background
 Earlier versions of Microsoft Windows included a simple graphical tool called **Winipcfg** for viewing and managing IP addresses. This utility was discontinued after Windows ME, leaving only command-line tools and more complex network settings for users. **IPGui** is inspired by Winipcfg and brings back a straightforward, user-friendly interface for viewing and refreshing your IP configuration on modern Windows systems.
