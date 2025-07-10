@@ -1,6 +1,14 @@
+<<<<<<< HEAD
+=======
+Version 2.5.0
+>>>>>>> 0cd8be9b8c1b18a7f2d5655cbcc5d56ddbd60430
 
 
 
+<<<<<<< HEAD
+=======
+Homepage: [https://prog.nalle.no](https://prog.nalle.no/nb/home/ipgui)
+>>>>>>> 0cd8be9b8c1b18a7f2d5655cbcc5d56ddbd60430
 
 
 
@@ -13,6 +21,7 @@
   
   >
 
+<<<<<<< HEAD
     <style>
 :root {
   --fontStack-monospace: "Monaspace Neon", ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace !important;
@@ -1993,4 +2002,24 @@ data-styled.g7[id="Truncate__StyledTruncate-sc-23o1d2-0"]{content:"bgsFir,"}/*!s
     <div id="js-global-screen-reader-notice-assertive" class="sr-only mt-n1" aria-live="assertive" aria-atomic="true"></div>
   </body>
 </html>
+=======
+It is also capable of releasing and refreshing the IP address via DHCP and also flush the DNS cache.
+
+In the «Action» menu you will find an «Always on top» selection. That lets your application lay over other active programs for comparing.
+
+The menu also has a NetTools submenu containing:
+* Ping
+A simple interface for pinging hosts.
+* IP scanner
+To scan for devices on the local network.
+* NS Lookup
+To query Domain Name System (DNS) servers.
+* Traceroute
+To trace the route to a host.
+* PortScan
+It's a simple port-scanner to see which ports are open on your system or other hosts.
+* DHCP Status.
+Shows you lease time, time of expiry time and more
+
+>>>>>>> 0cd8be9b8c1b18a7f2d5655cbcc5d56ddbd60430
 
