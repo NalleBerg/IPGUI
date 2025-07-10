@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 2.4.0
+// Project version: 2.5.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -45,6 +45,8 @@
 #include <QHostInfo>
 #include <QProgressBar>
 #include <QInputDialog>
+#include <QMap>
+#include <QPair>
 
 
 
@@ -55,7 +57,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.4.6";
+const QString VersionNumber = "2.5.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 
@@ -385,22 +387,288 @@ void updateIpDisplay(QTextEdit *infoBox) {
     infoBox->setHtml(basicInfoHtml);
 }
 
+struct PortInfo {
+    QString serviceName;
+    QString description;
+};
+
+// Loads the port info from IANA or local CSV, returns map: (port, proto) -> PortInfo
+QMap<QPair<int, QString>, PortInfo> loadPortInfoCSV(QWidget *parent = nullptr) {
+    QMap<QPair<int, QString>, PortInfo> portMap;
+    QString csvData;
+    // Try to download from IANA
+    QNetworkAccessManager mgr;
+    QNetworkRequest req(QUrl("https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.csv"));
+    QNetworkReply *reply = mgr.get(req);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(3000); // 3s timeout
+    loop.exec();
+    if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+        csvData = reply->readAll();
+    }
+    reply->deleteLater();
+    if (csvData.isEmpty()) {
+        // Fallback to local file
+        QFile file("service-names-port-numbers.csv");
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            csvData = in.readAll();
+            file.close();
+        }
+    }
+    if (csvData.isEmpty()) {
+        if (parent)
+            QMessageBox::warning(parent, "Port Info", "Could not load port info from IANA or local file.");
+        return portMap;
+    }
+    // Parse CSV
+    QStringList lines = csvData.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+    if (lines.isEmpty()) return portMap;
+    QStringList header = lines.takeFirst().split(',');
+    int portIdx = header.indexOf("Port Number");
+    int protoIdx = header.indexOf("Transport Protocol");
+    int nameIdx = header.indexOf("Service Name");
+    int descIdx = header.indexOf("Description");
+    for (const QString &line : lines) {
+        QStringList cols = line.split(',', Qt::KeepEmptyParts);
+        if (cols.size() < qMax(qMax(portIdx, protoIdx), qMax(nameIdx, descIdx)) + 1)
+            continue;
+        bool ok = false;
+        int port = cols[portIdx].toInt(&ok);
+        if (!ok) continue;
+        QString proto = cols[protoIdx].trimmed().toLower();
+        QString name = cols[nameIdx].trimmed();
+        QString desc = cols[descIdx].trimmed();
+        if (proto.isEmpty()) continue;
+        QPair<int, QString> key(port, proto);
+        if (!portMap.contains(key)) {
+            portMap[key] = PortInfo{name, desc};
+        }
+    }
+    return portMap;
+}
 
 void showPortScanDialog(QWidget *parent) {
-    QDialog dlg(parent);
-    dlg.setWindowTitle("Port Scan");
-    QVBoxLayout layout(&dlg);
-    QLabel label("Port scan not implemented yet.");
-    layout.addWidget(&label);
-    QPushButton ok("OK");
-    layout.addWidget(&ok);
-    QObject::connect(&ok, &QPushButton::clicked, &dlg, &QDialog::accept);
-    dlg.exec();
+    QDialog *dlg = new QDialog(parent);
+    dlg->setWindowTitle("Port Scan");
+    // Remove the Close (X) button from the window frame
+    dlg->setWindowFlags((dlg->windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::Dialog | Qt::WindowTitleHint);
+
+    QVBoxLayout *layout = new QVBoxLayout(dlg);
+
+    QLabel *inputLabel = new QLabel("Target (IP or hostname):");
+    QLineEdit *targetEdit = new QLineEdit("127.0.0.1");
+    QLabel *rangeLabel = new QLabel("Port range (e.g. 1-1024):");
+    QLineEdit *rangeEdit = new QLineEdit("1-1024");
+    layout->addWidget(inputLabel);
+    layout->addWidget(targetEdit);
+    layout->addWidget(rangeLabel);
+    layout->addWidget(rangeEdit);
+
+    QHBoxLayout *currentPortLayout = new QHBoxLayout();
+    QLabel *checkingLabel = new QLabel("Checking port number:");
+    QLineEdit *currentPortEdit = new QLineEdit;
+    currentPortEdit->setReadOnly(true);
+    currentPortEdit->setAlignment(Qt::AlignCenter);
+    QFont font = currentPortEdit->font();
+    font.setPointSize(14);
+    font.setBold(true);
+    currentPortEdit->setFont(font);
+    currentPortEdit->setFixedWidth(100);
+
+    QLabel *progressLabel = new QLabel("0 % done");
+    progressLabel->setFixedWidth(120);
+    progressLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+
+    currentPortLayout->addWidget(checkingLabel);
+    currentPortLayout->addWidget(currentPortEdit);
+    currentPortLayout->addWidget(progressLabel);
+    layout->addLayout(currentPortLayout);
+
+    QLabel *etaLabel = new QLabel("Estimated time remaining: --");
+    etaLabel->setMinimumWidth(320);
+    etaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    etaLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    layout->addWidget(etaLabel);
+
+    QTextEdit *output = new QTextEdit;
+    output->setReadOnly(true);
+    output->setLineWrapMode(QTextEdit::NoWrap);
+    output->setMinimumHeight(120);
+    layout->addWidget(output);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *scanBtn = new QPushButton("Scan");
+    QPushButton *stopCloseBtn = new QPushButton("Close");
+    btnLayout->addWidget(scanBtn);
+    btnLayout->addWidget(stopCloseBtn);
+    layout->addLayout(btnLayout);
+
+    // State
+    auto scanRunning = std::make_shared<bool>(false);
+
+    // Helper to update Stop/Close button text
+    auto updateStopCloseText = [=]() {
+        stopCloseBtn->setText(*scanRunning ? "Stop" : "Close");
+    };
+    updateStopCloseText();
+
+    // Load port info once per scan
+    static QMap<QPair<int, QString>, PortInfo> portInfoMap;
+
+    QTimer *timer = new QTimer(dlg);
+    timer->setSingleShot(true);
+
+    QObject::connect(scanBtn, &QPushButton::clicked, [=]() mutable {
+        QString target = targetEdit->text().trimmed();
+        QString range = rangeEdit->text().trimmed();
+        QRegularExpression re(R"((\d+)\s*-\s*(\d+))");
+        QRegularExpressionMatch m = re.match(range);
+        int startPort = 1, endPort = 1024;
+        if (m.hasMatch()) {
+            startPort = m.captured(1).toInt();
+            endPort = m.captured(2).toInt();
+        } else {
+            QMessageBox::warning(dlg, "Input Error", "Invalid port range.");
+            return;
+        }
+        if (startPort < 1 || endPort > 65535 || startPort > endPort) {
+            QMessageBox::warning(dlg, "Input Error", "Port range must be 1-65535 and start <= end.");
+            return;
+        }
+
+        // Load port info (only once per run)
+        if (portInfoMap.isEmpty()) {
+            portInfoMap = loadPortInfoCSV(dlg);
+        }
+
+        scanBtn->setEnabled(false);
+        *scanRunning = true;
+        updateStopCloseText();
+        output->clear();
+        progressLabel->setText("0 % done");
+        etaLabel->setText("Estimated time remaining: --");
+        currentPortEdit->clear();
+
+        int totalCount = endPort - startPort + 1;
+        auto checkedCount = std::make_shared<int>(0);
+        auto openCount = std::make_shared<int>(0);
+        auto startTime = std::make_shared<QElapsedTimer>();
+        startTime->start();
+        auto nextPort = std::make_shared<int>(startPort);
+
+        // Disconnect any previous connections to avoid multiple triggers
+        QObject::disconnect(timer, nullptr, nullptr, nullptr);
+
+        std::function<void()> scanNextPort;
+        scanNextPort = [=]() mutable {
+            if (!*scanRunning || *nextPort > endPort) {
+                scanBtn->setEnabled(true);
+                *scanRunning = false;
+                updateStopCloseText();
+                progressLabel->setText("100 % done");
+                etaLabel->setText("Estimated time remaining: 0 minutes and 0 seconds");
+                currentPortEdit->clear();
+                output->append(QString("<br><b>Scan complete. %1 open port%2 found.</b>")
+                    .arg(*openCount)
+                    .arg(*openCount == 1 ? "" : "s"));
+                QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after scan
+                return;
+            }
+            int port = *nextPort;
+            (*nextPort)++;
+            currentPortEdit->setText(QString::number(port));
+            QTcpSocket *sock = new QTcpSocket(dlg);
+            sock->connectToHost(target, port);
+            QTimer::singleShot(200, sock, [=]() {
+                bool connected = (sock->state() == QAbstractSocket::ConnectedState);
+                if (connected) {
+                    (*openCount)++;
+                    // Lookup port info
+                    PortInfo info = portInfoMap.value(qMakePair(port, QString("tcp")));
+                    QString service = info.serviceName.isEmpty() ? "Unknown" : info.serviceName;
+                    QString desc = info.description.isEmpty() ? "No description" : info.description;
+                    output->append(
+                        QString("<span style='color:blue; font-weight:bold;'>%1</span> "
+                                "<span style='color:limegreen; font-weight:bold;'>OPEN &#x1F389;</span> "
+                                "<span style='color:gray;'>&nbsp;%2</span> "
+                                "<span style='color:#888;'>&nbsp;%3</span>")
+                        .arg(port)
+                        .arg(service.toHtmlEscaped())
+                        .arg(desc.toHtmlEscaped())
+                    );
+                }
+                (*checkedCount)++;
+                int percent = int((double(*checkedCount) * 100.0) / totalCount);
+                progressLabel->setText(QString("%1 % done").arg(percent));
+                // ETA calculation
+                qint64 elapsedMs = startTime->elapsed();
+                if (*checkedCount > 0 && percent < 100) {
+                    double avgMsPerPort = double(elapsedMs) / *checkedCount;
+                    int portsLeft = totalCount - *checkedCount;
+                    int msLeft = int(avgMsPerPort * portsLeft);
+                    int secLeft = msLeft / 1000;
+                    int minLeft = secLeft / 60;
+                    secLeft = secLeft % 60;
+                    etaLabel->setText(QString("Estimated time remaining: %1 minute%2 and %3 second%4")
+                        .arg(minLeft)
+                        .arg(minLeft == 1 ? "" : "s")
+                        .arg(secLeft)
+                        .arg(secLeft == 1 ? "" : "s"));
+                } else if (percent >= 100) {
+                    etaLabel->setText("Estimated time remaining: 0 minutes and 0 seconds");
+                }
+                sock->abort();
+                sock->deleteLater();
+                if (*scanRunning)
+                    timer->start(1); // Schedule next port
+            });
+        };
+
+        QObject::connect(timer, &QTimer::timeout, scanNextPort);
+
+        // Start scanning
+        scanNextPort();
+    });
+
+    QObject::connect(stopCloseBtn, &QPushButton::clicked, [=]() mutable {
+        if (*scanRunning) {
+            // Stop the scan
+            *scanRunning = false;
+            scanBtn->setEnabled(true);
+            progressLabel->setText("0 % done");
+            etaLabel->setText("Estimated time remaining: --");
+            output->append("<b>Scan stopped.</b>");
+            currentPortEdit->clear();
+            updateStopCloseText();
+            QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after stop
+        } else {
+            dlg->close();
+        }
+    });
+
+    // If user closes the dialog window, also stop scan
+    QObject::connect(dlg, &QDialog::rejected, [=]() mutable {
+        *scanRunning = false;
+        QObject::disconnect(timer, nullptr, nullptr, nullptr);
+    });
+
+    dlg->adjustSize();
+    dlg->exec();
+    dlg->deleteLater();
 }
+
 
 void showTracerouteDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Traceroute Host");
+    // Remove the Close (X) button from the window frame
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
+
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
     QLabel *prompt = new QLabel("Enter host or IP to trace:");
@@ -427,19 +695,23 @@ void showTracerouteDialog(QWidget *parent) {
 
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *traceBtn = new QPushButton("Start");
-    QPushButton *stopBtn = new QPushButton("Stop");
+    QPushButton *stopCloseBtn = new QPushButton("Close");
     QPushButton *bottomBtn = new QPushButton("Bottom");
-    QPushButton *closeBtn = new QPushButton("Close");
     btnLayout->addWidget(traceBtn);
-    btnLayout->addWidget(stopBtn);
+    btnLayout->addWidget(stopCloseBtn);
     btnLayout->addWidget(bottomBtn);
-    btnLayout->addWidget(closeBtn);
     layout->addLayout(btnLayout);
 
-    stopBtn->setEnabled(false);
-
+    // State
+    bool isTracing = false;
     QPointer<QProcess> lastProc = nullptr;
     QPointer<QDialog> scanningDlg = nullptr;
+
+    // Helper to update Stop/Close button text
+    auto updateStopCloseText = [&]() {
+        stopCloseBtn->setText(isTracing ? "Stop" : "Close");
+    };
+    updateStopCloseText();
 
     QObject::connect(traceBtn, &QPushButton::clicked, [&]() {
         QString host = input->text().trimmed();
@@ -449,7 +721,8 @@ void showTracerouteDialog(QWidget *parent) {
             return;
         }
         traceBtn->setEnabled(false);
-        stopBtn->setEnabled(true);
+        isTracing = true;
+        updateStopCloseText();
         output->clear();
 
         if (lastProc) {
@@ -460,9 +733,10 @@ void showTracerouteDialog(QWidget *parent) {
 
         // Show scanning dialog
         if (!scanningDlg) {
-            scanningDlg = new QDialog(&dlg, Qt::Window | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+            scanningDlg = new QDialog(&dlg);
             scanningDlg->setWindowTitle("Scanning...");
             scanningDlg->setFixedSize(150, 150);
+            scanningDlg->setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
 
             QVBoxLayout *vbox = new QVBoxLayout(scanningDlg);
             QLabel *label = new QLabel("Scanning...");
@@ -477,7 +751,6 @@ void showTracerouteDialog(QWidget *parent) {
             movie->start();
 
             scanningDlg->setModal(false);
-            scanningDlg->setWindowFlags(scanningDlg->windowFlags() & ~Qt::WindowContextHelpButtonHint | Qt::WindowCloseButtonHint);
         }
         scanningDlg->show();
         scanningDlg->raise();
@@ -516,7 +789,8 @@ void showTracerouteDialog(QWidget *parent) {
             }
         });
 
-        QObject::connect(traceProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [=]() {
+        QObject::connect(traceProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            [=, &isTracing, &updateStopCloseText]() {
             // Show summary
             qint64 ms = timer->elapsed();
             int seconds = static_cast<int>((ms + 500) / 1000); // round to nearest second
@@ -535,20 +809,12 @@ void showTracerouteDialog(QWidget *parent) {
             output->append(summary);
 
             traceBtn->setEnabled(true);
-            stopBtn->setEnabled(false);
+            isTracing = false;
+            updateStopCloseText();
             traceProc->deleteLater();
             if (scanningDlg) scanningDlg->close();
         });
 
-        QObject::connect(stopBtn, &QPushButton::clicked, [=]() {
-            traceProc->kill();
-            traceProc->deleteLater();
-            traceBtn->setEnabled(true);
-            stopBtn->setEnabled(false);
-            if (scanningDlg) scanningDlg->close();
-        });
-
-        // If user closes the scanning dialog, just hide it (scan continues)
         QObject::connect(scanningDlg, &QDialog::rejected, [=]() {
             scanningDlg->hide();
         });
@@ -557,11 +823,24 @@ void showTracerouteDialog(QWidget *parent) {
         traceProc->start("cmd", QStringList() << "/c" << cmd);
     });
 
+    QObject::connect(stopCloseBtn, &QPushButton::clicked, [&]() {
+        if (isTracing && lastProc) {
+            lastProc->kill();
+            lastProc->deleteLater();
+            lastProc = nullptr;
+            isTracing = false;
+            traceBtn->setEnabled(true);
+            updateStopCloseText();
+            if (scanningDlg) scanningDlg->close();
+            output->append("<b>Traceroute stopped.</b>");
+        } else {
+            dlg.accept();
+        }
+    });
+
     QObject::connect(bottomBtn, &QPushButton::clicked, [&]() {
         output->verticalScrollBar()->setValue(output->verticalScrollBar()->maximum());
     });
-
-    QObject::connect(closeBtn, &QPushButton::clicked, [&]() { dlg.close(); });
 
     dlg.adjustSize();
     dlg.exec();
@@ -621,6 +900,7 @@ void showDhcpStatusDialog(QWidget *parent = nullptr) {
 
     QDialog dlg(parent);
     dlg.setWindowTitle("DHCP Status");
+  
     QVBoxLayout layout(&dlg);
 
     QLabel label(info);
@@ -776,8 +1056,12 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     }
     info += "</pre>";
 
-    QDialog dlg(parent);
+    // Create dialog with NO parent to ensure no X button
+    QDialog dlg(nullptr);
     dlg.setWindowTitle("NS Lookup Result");
+    dlg.setWindowFlags(Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+    dlg.setModal(true);
+
     QVBoxLayout layout(&dlg);
 
     QLabel *label = new QLabel(info);
@@ -1041,6 +1325,9 @@ QObject::connect(netscanAction, &QAction::triggered, [&]() {
 QObject::connect(pingAction, &QAction::triggered, [&]() {
     QDialog dlg(&window);
     dlg.setWindowTitle("Ping Host");
+    // Remove the Close (X) button from the window frame
+    dlg.setWindowFlags((dlg.windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::Dialog | Qt::WindowTitleHint);
+
     QVBoxLayout *pingLayout = new QVBoxLayout(&dlg);
 
     QLabel prompt("Enter host or IP to ping:");
@@ -1058,13 +1345,11 @@ QObject::connect(pingAction, &QAction::triggered, [&]() {
 
     QHBoxLayout btnLayout;
     QPushButton pingBtn("Start");
-    QPushButton stopBtn("Stop");
-    QPushButton bottomBtn("Bottom"); // New button
-    QPushButton closeBtn("Close");
+    QPushButton stopCloseBtn("Close");
+    QPushButton bottomBtn("Bottom");
     btnLayout.addWidget(&pingBtn);
-    btnLayout.addWidget(&stopBtn);
-    btnLayout.addWidget(&bottomBtn); // Add between Stop and Close
-    btnLayout.addWidget(&closeBtn);
+    btnLayout.addWidget(&stopCloseBtn);
+    btnLayout.addWidget(&bottomBtn);
     pingLayout->addLayout(&btnLayout);
 
     QTextEdit output;
@@ -1073,41 +1358,43 @@ QObject::connect(pingAction, &QAction::triggered, [&]() {
     output.setMinimumHeight(80);
     pingLayout->addWidget(&output);
 
-    
     // Connect Bottom button to scroll to bottom
-        QObject::connect(&bottomBtn, &QPushButton::clicked, [&output]() {
+    QObject::connect(&bottomBtn, &QPushButton::clicked, [&output]() {
         output.verticalScrollBar()->setValue(output.verticalScrollBar()->maximum());
-        });
-
+    });
 
     QTimer pingTimer;
     QProcess *pingProc = nullptr;
     bool isPinging = false;
-    
-// --- Auto-scroll support ---
-QTimer autoScrollTimer;
-autoScrollTimer.setSingleShot(true);
-QScrollBar *vScroll = output.verticalScrollBar();
-bool userIsScrolling = false;
 
-QObject::connect(vScroll, &QScrollBar::sliderPressed, [&]() {
-    userIsScrolling = true;
-    autoScrollTimer.stop();
-});
-QObject::connect(vScroll, &QScrollBar::sliderReleased, [&]() {
-    userIsScrolling = false;
-    autoScrollTimer.start(3000); // Start 3s timer after user lets go
-});
+    // --- Auto-scroll support ---
+    QTimer autoScrollTimer;
+    autoScrollTimer.setSingleShot(true);
+    QScrollBar *vScroll = output.verticalScrollBar();
+    bool userIsScrolling = false;
 
+    QObject::connect(vScroll, &QScrollBar::sliderPressed, [&]() {
+        userIsScrolling = true;
+        autoScrollTimer.stop();
+    });
+    QObject::connect(vScroll, &QScrollBar::sliderReleased, [&]() {
+        userIsScrolling = false;
+        autoScrollTimer.start(3000); // Start 3s timer after user lets go
+    });
 
-QObject::connect(&autoScrollTimer, &QTimer::timeout, [&]() {
-    if (!userIsScrolling && isPinging) {
-        output.verticalScrollBar()->setValue(output.verticalScrollBar()->maximum());
-    }
-});
-// --- End auto-scroll support ---
+    QObject::connect(&autoScrollTimer, &QTimer::timeout, [&]() {
+        if (!userIsScrolling && isPinging) {
+            output.verticalScrollBar()->setValue(output.verticalScrollBar()->maximum());
+        }
+    });
+    // --- End auto-scroll support ---
 
-    
+    // Helper to update Stop/Close button text
+    auto updateStopCloseText = [&]() {
+        stopCloseBtn.setText(isPinging ? "Stop" : "Close");
+    };
+    updateStopCloseText();
+
     auto stopPinging = [&]() {
         pingTimer.stop();
         if (pingProc) {
@@ -1117,27 +1404,33 @@ QObject::connect(&autoScrollTimer, &QTimer::timeout, [&]() {
         }
         isPinging = false;
         pingBtn.setEnabled(true);
-        stopBtn.setEnabled(false);
+        updateStopCloseText();
     };
 
     QObject::connect(&pingBtn, &QPushButton::clicked, [&]() {
-    QString host = input.text().trimmed();
-    if (host.isEmpty()) {
-        output.setPlainText("Please enter a host or IP address.");
-        return;
-    }
-    output.clear();
-    pingBtn.setEnabled(false);
-    stopBtn.setEnabled(true);
-    isPinging = true;
-    pingCount = 0;
-    counterLabel.setText("<span style='color:blue;'>Pings: 0</span>");
-    pingTimer.start(1000);
-    QMetaObject::invokeMethod(&pingTimer, "timeout");
-});
+        QString host = input.text().trimmed();
+        if (host.isEmpty()) {
+            output.setPlainText("Please enter a host or IP address.");
+            return;
+        }
+        output.clear();
+        pingBtn.setEnabled(false);
+        isPinging = true;
+        updateStopCloseText();
+        pingCount = 0;
+        counterLabel.setText("<span style='color:blue;'>Pings: 0</span>");
+        pingTimer.start(1000);
+        QMetaObject::invokeMethod(&pingTimer, "timeout");
+    });
 
-    QObject::connect(&stopBtn, &QPushButton::clicked, stopPinging);
-    QObject::connect(&closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(&stopCloseBtn, &QPushButton::clicked, [&]() {
+        if (isPinging) {
+            stopPinging();
+            output.append("<b>Ping stopped.</b>");
+        } else {
+            dlg.accept();
+        }
+    });
 
     QObject::connect(&pingTimer, &QTimer::timeout, [&]() {
         if (!isPinging) return;
@@ -1150,48 +1443,41 @@ QObject::connect(&autoScrollTimer, &QTimer::timeout, [&]() {
             pingProc = nullptr;
         }
         pingProc = new QProcess(&dlg);
-       QObject::connect(pingProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+        QObject::connect(pingProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             [&output, &host, &pingCount, &counterLabel, &dlg, pingProc](int, QProcess::ExitStatus) {
-       
-        QString result = pingProc->readAllStandardOutput();
-        ++pingCount;
-        counterLabel.setText(QString("<span style='color:blue;'>Pings: %1</span>").arg(pingCount));
-        QStringList lines = result.trimmed().split('\n');
-        if (!lines.isEmpty()) {
-            output.append(QString("<span style='color:blue;'>[%1]</span> %2").arg(pingCount).arg(lines.first().trimmed()));
-            for (int i = 1; i < lines.size(); ++i)
-                output.append(lines[i].trimmed());
-        }
 
-        if (!lines.isEmpty()) {
-    output.append(QString("<span style='color:blue;'>[%1]</span> %2").arg(pingCount).arg(lines.first().trimmed()));
-    for (int i = 1; i < lines.size(); ++i)
-        output.append(lines[i].trimmed());
-        }
+            QString result = pingProc->readAllStandardOutput();
+            ++pingCount;
+            counterLabel.setText(QString("<span style='color:blue;'>Pings: %1</span>").arg(pingCount));
+            QStringList lines = result.trimmed().split('\n');
+            if (!lines.isEmpty()) {
+                output.append(QString("<span style='color:blue;'>[%1]</span> %2").arg(pingCount).arg(lines.first().trimmed()));
+                for (int i = 1; i < lines.size(); ++i)
+                    output.append(lines[i].trimmed());
+            }
 
-        // --- Auto-resize ping dialog to fit long lines ---
-        QFontMetrics fm(output.font());
-        int maxLineWidth = 0;
-        for (const QString &line : lines) {
-            int width = fm.horizontalAdvance(line);
-            if (width > maxLineWidth)
-                maxLineWidth = width;
-        }
-    int margin = 80; // Add some margin for scrollbars and padding
-    int minWidth = 400; // Minimum width for the dialog
-    int newWidth = qMax(minWidth, maxLineWidth + margin);
-    if (dlg.width() < newWidth)
-        dlg.resize(newWidth, dlg.height());
-    // --- End auto-resize ---
+            // --- Auto-resize ping dialog to fit long lines ---
+            QFontMetrics fm(output.font());
+            int maxLineWidth = 0;
+            for (const QString &line : lines) {
+                int width = fm.horizontalAdvance(line);
+                if (width > maxLineWidth)
+                    maxLineWidth = width;
+            }
+            int margin = 80; // Add some margin for scrollbars and padding
+            int minWidth = 400; // Minimum width for the dialog
+            int newWidth = qMax(minWidth, maxLineWidth + margin);
+            if (dlg.width() < newWidth)
+                dlg.resize(newWidth, dlg.height());
+            // --- End auto-resize ---
         });
-            pingProc->start("ping", QStringList() << "-n" << "1" << host);
-        });
+        pingProc->start("ping", QStringList() << "-n" << "1" << host);
+    });
 
-        stopBtn.setEnabled(false);
-        dlg.adjustSize();
-        dlg.exec();
-        stopPinging();
-    }); 
+    dlg.adjustSize();
+    dlg.exec();
+    stopPinging();
+}); 
 
 
 QObject::connect(tracertAction, &QAction::triggered, [&]() {
@@ -1351,7 +1637,7 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
         "A simple IP lookup/renew -tool.<br>"
         "Visit my programming <a href='https://prog.nalle.no'> web page</a>.<br>"
         "&nbsp;<br>"
-        "<b>Version:</b> 2.3.0<br>"
+        "<b>Version:</b> 2.5.0<br>"
         "<B>License:</B> <a href='https://www.gnu.org/licenses/old-licenses/gpl-2.0.html'>GPLv2</a><br>"
     );
     label.setOpenExternalLinks(true);

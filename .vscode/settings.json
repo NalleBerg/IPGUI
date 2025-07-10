@@ -59,6 +59,7 @@
   "files.associations": {
     "type_traits": "cpp",
     "xutility": "cpp",
-    "memory": "cpp"
+    "memory": "cpp",
+    "atomic": "cpp"
   }
 }

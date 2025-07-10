@@ -388,12 +388,162 @@ void updateIpDisplay(QTextEdit *infoBox) {
 void showPortScanDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Port Scan");
-    QVBoxLayout layout(&dlg);
-    QLabel label("Port scan not implemented yet.");
-    layout.addWidget(&label);
-    QPushButton ok("OK");
-    layout.addWidget(&ok);
-    QObject::connect(&ok, &QPushButton::clicked, &dlg, &QDialog::accept);
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *inputLabel = new QLabel("Target (IP or hostname):");
+    QLineEdit *targetEdit = new QLineEdit("127.0.0.1");
+    QLabel *rangeLabel = new QLabel("Port range (e.g. 20-1024):");
+    QLineEdit *rangeEdit = new QLineEdit("20-1024");
+    layout->addWidget(inputLabel);
+    layout->addWidget(targetEdit);
+    layout->addWidget(rangeLabel);
+    layout->addWidget(rangeEdit);
+
+    QTextEdit *output = new QTextEdit;
+    output->setReadOnly(true);
+    output->setLineWrapMode(QTextEdit::NoWrap);
+    output->setMinimumHeight(120);
+    layout->addWidget(output);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *scanBtn = new QPushButton("Scan");
+    QPushButton *stopBtn = new QPushButton("Stop");
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnLayout->addWidget(scanBtn);
+    btnLayout->addWidget(stopBtn);
+    btnLayout->addWidget(closeBtn);
+    layout->addLayout(btnLayout);
+
+    stopBtn->setEnabled(false);
+
+    QPointer<QProcess> scanProc = nullptr;
+    QPointer<QDialog> scanningDlg = nullptr;
+
+    QObject::connect(scanBtn, &QPushButton::clicked, [&]() {
+        QString target = targetEdit->text().trimmed();
+        QString range = rangeEdit->text().trimmed();
+        QRegularExpression re(R"((\d+)\s*-\s*(\d+))");
+        QRegularExpressionMatch m = re.match(range);
+        int startPort = 0, endPort = 0;
+        if (m.hasMatch()) {
+            startPort = m.captured(1).toInt();
+            endPort = m.captured(2).toInt();
+        } else {
+            QMessageBox::warning(&dlg, "Input Error", "Invalid port range.");
+            return;
+        }
+        if (startPort < 1 || endPort > 65535 || startPort > endPort) {
+            QMessageBox::warning(&dlg, "Input Error", "Port range must be 1-65535.");
+            return;
+        }
+
+        scanBtn->setEnabled(false);
+        stopBtn->setEnabled(true);
+        output->clear();
+
+        // Show scanning dialog (modal, animated)
+        if (!scanningDlg) {
+            scanningDlg = new QDialog(&dlg, Qt::Window | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+            scanningDlg->setWindowTitle("Scanning...");
+            scanningDlg->setFixedSize(150, 150);
+
+            QVBoxLayout *vbox = new QVBoxLayout(scanningDlg);
+            QLabel *label = new QLabel("Scanning...");
+            vbox->addWidget(label, 0, Qt::AlignHCenter);
+
+            QLabel *animLabel = new QLabel;
+            animLabel->setFixedSize(96, 96);
+            animLabel->setScaledContents(true);
+            QMovie *movie = new QMovie("StdWorking.gif"); // <-- Set your GIF path/resource here
+            animLabel->setMovie(movie);
+            vbox->addWidget(animLabel, 0, Qt::AlignHCenter);
+            movie->start();
+
+            scanningDlg->setModal(false);
+            scanningDlg->setWindowFlags(scanningDlg->windowFlags() & ~Qt::WindowContextHelpButtonHint | Qt::WindowCloseButtonHint);
+        }
+        scanningDlg->show();
+        scanningDlg->raise();
+        scanningDlg->activateWindow();
+        QCoreApplication::processEvents();
+
+        // Build PowerShell script for fast scanning
+        QString psScript = QString(
+            "$ports=%1..%2; "
+            "foreach ($p in $ports) { "
+            "try { "
+            "  $tcp = New-Object System.Net.Sockets.TcpClient; "
+            "  $tcp.Connect('%3', $p); "
+            "  if ($tcp.Connected) { Write-Host \"$p OPEN\"; $tcp.Close() } "
+            "} catch { Write-Host \"$p CLOSED\" } "
+            "}"
+        ).arg(startPort).arg(endPort).arg(target);
+
+        QProcess *proc = new QProcess(&dlg);
+        scanProc = proc;
+        QStringList args;
+        args << "-NoProfile" << "-Command" << psScript;
+        proc->start("powershell.exe", args);
+
+        int openCount = 0, scanned = 0;
+
+        QObject::connect(proc, &QProcess::readyReadStandardOutput, [=, &openCount, &scanned]() mutable {
+            while (proc->canReadLine()) {
+                QString line = QString::fromLocal8Bit(proc->readLine()).trimmed();
+                QRegularExpression matchRe(R"((\d+)\s+(OPEN|CLOSED))");
+                QRegularExpressionMatch match = matchRe.match(line);
+                if (match.hasMatch()) {
+                    int port = match.captured(1).toInt();
+                    QString status = match.captured(2);
+                    scanned++;
+                    if (status == "OPEN") {
+                        openCount++;
+                        output->append(QString("<b>%1 OPEN</b>").arg(port));
+                    } else {
+                        output->append(QString("%1 closed").arg(port));
+                    }
+                }
+            }
+        });
+
+        QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [=]() {
+            scanBtn->setEnabled(true);
+            stopBtn->setEnabled(false);
+            if (scanningDlg) scanningDlg->close();
+            output->append(QString("<br><b>Scan complete. %1 open port%2 found.</b>")
+                .arg(openCount)
+                .arg(openCount == 1 ? "" : "s"));
+            proc->deleteLater();
+            scanProc = nullptr;
+        });
+
+        QObject::connect(proc, &QProcess::readyReadStandardError, [=]() {
+            QString err = QString::fromLocal8Bit(proc->readAllStandardError());
+            if (!err.trimmed().isEmpty())
+                output->append("<span style='color:red'>" + err.toHtmlEscaped() + "</span>");
+        });
+    });
+
+    QObject::connect(stopBtn, &QPushButton::clicked, [&]() {
+        stopBtn->setEnabled(false);
+        if (scanProc) {
+            scanProc->kill();
+            scanProc->deleteLater();
+            scanProc = nullptr;
+        }
+        if (scanningDlg) scanningDlg->close();
+        output->append("<b>Scan stopped.</b>");
+        scanBtn->setEnabled(true);
+    });
+
+    QObject::connect(closeBtn, &QPushButton::clicked, [&]() { dlg.close(); });
+
+    // If user closes the scanning dialog, just hide it (scan continues)
+    QObject::connect(scanningDlg, &QDialog::rejected, [=]() {
+        scanningDlg->hide();
+    });
+
+    dlg.adjustSize();
     dlg.exec();
 }
 
