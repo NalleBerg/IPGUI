@@ -60,7 +60,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.6.0";
+const QString VersionNumber = "2.6.1";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 
@@ -1118,12 +1118,14 @@ void showArpDialog(QWidget *parent = nullptr) {
     table->setMaximumHeight(600);
     layout->addWidget(table);
 
-    // --- Advanced/Close buttons centered at bottom ---
+    // --- Advanced/Refresh/Close buttons centered at bottom ---
     QHBoxLayout *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
     QPushButton *advBtn = new QPushButton("Advanced");
+    QPushButton *refreshBtn = new QPushButton("Refresh");
     QPushButton *closeBtn = new QPushButton("Close");
     btnLayout->addWidget(advBtn);
+    btnLayout->addWidget(refreshBtn);
     btnLayout->addWidget(closeBtn);
     btnLayout->addStretch();
     layout->addLayout(btnLayout);
@@ -1195,6 +1197,14 @@ void showArpDialog(QWidget *parent = nullptr) {
     QObject::connect(advBtn, &QPushButton::clicked, [&]() {
         advanced = !advanced;
         advBtn->setText(advanced ? "Basic" : "Advanced");
+        QProcess proc;
+        proc.start("arp", QStringList() << (advanced ? "-av" : "-a"));
+        proc.waitForFinished();
+        fillTable(QString::fromLocal8Bit(proc.readAllStandardOutput()));
+    });
+
+    // --- Refresh button logic ---
+    QObject::connect(refreshBtn, &QPushButton::clicked, [&]() {
         QProcess proc;
         proc.start("arp", QStringList() << (advanced ? "-av" : "-a"));
         proc.waitForFinished();
