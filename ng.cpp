@@ -47,6 +47,9 @@
 #include <QInputDialog>
 #include <QMap>
 #include <QPair>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QFormLayout>
 
 
 
@@ -57,7 +60,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.5.0";
+const QString VersionNumber = "2.6.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 
@@ -1077,6 +1080,132 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     dlg.exec();
 }
 
+void showArpDialog(QWidget *parent = nullptr) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("ARP Table");
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    // --- Remove arp entries section (moved up) ---
+    QHBoxLayout *delLayout = new QHBoxLayout();
+    QLabel *removeLabel = new QLabel("Remove arp entries:");
+    QLineEdit *ipEdit = new QLineEdit("*");
+    ipEdit->setPlaceholderText("IP to delete (e.g. 192.168.1.1 or * for all)");
+    QPushButton *delBtn = new QPushButton("Delete");
+    delLayout->addWidget(removeLabel);
+    delLayout->addWidget(ipEdit);
+    delLayout->addWidget(delBtn);
+    layout->addLayout(delLayout);
+
+    // Tooltip with yellow background, two lines
+    ipEdit->setToolTip(
+        "<div style='background-color:yellow; color:black; padding:4px;'>"
+        "Insert IP from the arp table<br>or leave as it is to delete all arp entries"
+        "</div>"
+    );
+
+    // --- Table ---
+    QTableWidget *table = new QTableWidget();
+    table->setColumnCount(3);
+    table->setHorizontalHeaderLabels(QStringList() << "Internet Address" << "Physical Address" << "Type");
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    table->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    table->setMaximumHeight(600);
+    layout->addWidget(table);
+
+    // --- Advanced/Close buttons centered at bottom ---
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
+    QPushButton *advBtn = new QPushButton("Advanced");
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnLayout->addWidget(advBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
+
+    // --- Helper to fill table from arp output and resize dialog ---
+    auto adjustWidths = [&]() {
+        table->resizeColumnsToContents();
+        QCoreApplication::processEvents(); // Ensure columns are resized
+
+        int totalWidth = table->verticalHeader()->width();
+        for (int i = 0; i < table->columnCount(); ++i)
+            totalWidth += table->columnWidth(i);
+        totalWidth += table->frameWidth() * 2;
+        if (table->verticalScrollBar()->isVisible())
+            totalWidth += table->verticalScrollBar()->width();
+        totalWidth += 18; // 8 + 10 px extra for comfort
+
+        table->setMinimumWidth(totalWidth);
+        table->setMaximumWidth(totalWidth);
+        dlg.setFixedWidth(totalWidth + layout->contentsMargins().left() + layout->contentsMargins().right());
+    };
+
+    auto fillTable = [&](const QString &output) {
+        table->setRowCount(0);
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        for (const QString &line : lines) {
+            QString trimmed = line.trimmed();
+            // Skip headers and interface lines
+            if (trimmed.startsWith("Interface:") || trimmed.startsWith("Internet Address") || trimmed.isEmpty())
+                continue;
+            QStringList parts = trimmed.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (parts.size() == 3) {
+                int row = table->rowCount();
+                table->insertRow(row);
+                for (int i = 0; i < 3; ++i)
+                    table->setItem(row, i, new QTableWidgetItem(parts[i]));
+            }
+        }
+        adjustWidths();
+    };
+
+    // --- Run arp -a initially ---
+    bool advanced = false;
+    QProcess proc;
+    proc.start("arp", QStringList() << "-a");
+    proc.waitForFinished();
+    QString arpOutput = QString::fromLocal8Bit(proc.readAllStandardOutput());
+    fillTable(arpOutput);
+
+    // --- Delete button logic (with UAC elevation) ---
+    QObject::connect(delBtn, &QPushButton::clicked, [&]() {
+        QString ip = ipEdit->text().trimmed();
+        if (ip.isEmpty())
+            return;
+        QString command = QString("Start-Process arp -ArgumentList '-d %1' -Verb runAs -WindowStyle Hidden").arg(ip);
+        int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << command);
+        if (result == 0) {
+            QMessageBox::information(&dlg, "ARP", "ARP entry deleted (or all entries deleted).");
+        } else {
+            QMessageBox::warning(&dlg, "ARP", "Failed to delete ARP entry. (You may need to accept the UAC prompt.)");
+        }
+        QProcess proc;
+        proc.start("arp", QStringList() << (advanced ? "-av" : "-a"));
+        proc.waitForFinished();
+        fillTable(QString::fromLocal8Bit(proc.readAllStandardOutput()));
+    });
+
+    // --- Advanced/Basic toggle logic ---
+    QObject::connect(advBtn, &QPushButton::clicked, [&]() {
+        advanced = !advanced;
+        advBtn->setText(advanced ? "Basic" : "Advanced");
+        QProcess proc;
+        proc.start("arp", QStringList() << (advanced ? "-av" : "-a"));
+        proc.waitForFinished();
+        fillTable(QString::fromLocal8Bit(proc.readAllStandardOutput()));
+    });
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+}
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -1282,6 +1411,8 @@ QAction *nslookupAction = netToolsMenu->addAction("NS Lookup...");
 QAction *tracertAction = netToolsMenu->addAction("Traceroute...");
 QAction *portscanAction = netToolsMenu->addAction("Port Scan...");
 QAction *dhcpStatusAction = netToolsMenu->addAction("DHCP Status...");
+QAction *arpAction = netToolsMenu->addAction("Arp...");
+
 
 // Add "Always on top" toggle
 QAction *alwaysOnTopAction = fileMenu->addAction("Always on top");
@@ -1289,6 +1420,10 @@ alwaysOnTopAction->setCheckable(true);
 QObject::connect(alwaysOnTopAction, &QAction::toggled, &window, [&](bool checked) {
     window.setWindowFlag(Qt::WindowStaysOnTopHint, checked);
     window.show();
+});
+
+QObject::connect(arpAction, &QAction::triggered, [&]() {
+    showArpDialog(&window);
 });
 
 QObject::connect(flushDnsAction, &QAction::triggered, [&]() {
@@ -1637,7 +1772,7 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
         "A simple IP lookup/renew -tool.<br>"
         "Visit my programming <a href='https://prog.nalle.no'> web page</a>.<br>"
         "&nbsp;<br>"
-        "<b>Version:</b> 2.5.0<br>"
+        "<b>Version:</b> " + VersionNumber + "<br>"
         "<B>License:</B> <a href='https://www.gnu.org/licenses/old-licenses/gpl-2.0.html'>GPLv2</a><br>"
     );
     label.setOpenExternalLinks(true);

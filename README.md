@@ -1,9 +1,9 @@
-### Version 2.5.0
+Version 2.5.0
 
-Copyleft Nalle Berg 2025
 
-License: GPL V2 - https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
+<<<<<<< HEAD
+=======
 Homepage: [https://prog.nalle.no](https://prog.nalle.no/nb/home/ipgui)
 
 Download installer: https://prog.nalle.no/ipgui/
@@ -11,7 +11,7 @@ Download installer: https://prog.nalle.no/ipgui/
 ### Background
 Earlier versions of Microsoft Windows included a simple graphical tool called **Winipcfg** for viewing and managing IP addresses. This utility was discontinued after Windows ME, leaving only command-line tools and more complex network settings for users. **IPGui** is inspired by Winipcfg and brings back a straightforward, user-friendly interface for viewing and refreshing your IP configuration on modern Windows systems.
 
-This is just a simple Graphic user interface for ipconfig. It will show the most importnt IP addresses with a possibility for 
+This is just a simple Graphic userinterface for ipconfig. It will show the most importnt IP addresses with a possibility for 
 «Advanced» mode showinw «ipconfig /all» in the window.
 
 It is also capable of releasing and refreshing the IP address via DHCP and also flush the DNS cache.
@@ -32,4 +32,5 @@ It's a simple port-scanner to see which ports are open on your system or other h
 * DHCP Status.
 Shows you lease time, time of expiry time and more
 
+>>>>>>> 0cd8be9b8c1b18a7f2d5655cbcc5d56ddbd60430
 
