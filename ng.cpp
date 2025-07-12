@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 2.5.0
+// Project version: 2.7.5
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -60,7 +60,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.6.1";
+const QString VersionNumber = "2.7.5";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 
@@ -1216,6 +1216,312 @@ void showArpDialog(QWidget *parent = nullptr) {
     dlg.exec();
 }
 
+void showWifiScanDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("WiFi Networks");
+    dlg.setFixedWidth(650);
+    dlg.setMaximumWidth(650);
+    dlg.setMinimumWidth(650);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *msgLabel = new QLabel;
+    msgLabel->setWordWrap(true);
+    msgLabel->setAlignment(Qt::AlignCenter);
+    QFont msgFont = msgLabel->font();
+    msgFont.setBold(false);
+    msgFont.setPointSize(11);
+    msgLabel->setFont(msgFont);
+    msgLabel->setStyleSheet("color:#1e90ff;");
+    msgLabel->setVisible(false);
+    layout->addWidget(msgLabel);
+
+    QLabel *info = new QLabel("Nearby WiFi networks (signal in dBm):");
+    layout->addWidget(info);
+
+    QTableWidget *table = new QTableWidget();
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels(QStringList() << "SSID" << "BSSID" << "Signal (dBm)" << "Channel");
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectItems);
+    table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    table->setMinimumHeight(250);
+    table->setMaximumWidth(630);
+    table->setMinimumWidth(630);
+    table->setFixedWidth(630);
+
+    // Set fixed column widths so table never expands
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table->setColumnWidth(0, 210); // SSID
+    table->setColumnWidth(1, 210); // BSSID
+    table->setColumnWidth(2, 110); // Signal
+    table->setColumnWidth(3, 90);  // Channel
+
+    // Force horizontal scroll bar if needed, never expand
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+
+    layout->addWidget(table);
+
+    QPushButton *refreshBtn = new QPushButton("Refresh");
+    QPushButton *locBtn = new QPushButton("Open Location Settings");
+    QPushButton *closeBtn = new QPushButton("Close");
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
+    btnLayout->addWidget(refreshBtn);
+    btnLayout->addWidget(locBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
+
+    QTimer *autoTimer = new QTimer(&dlg);
+    autoTimer->setInterval(1000);
+
+    std::function<void()> scanWifi;
+
+    auto showButtons = [&](bool showRefresh, bool showLoc, bool showClose) {
+        refreshBtn->setVisible(showRefresh);
+        locBtn->setVisible(showLoc);
+        closeBtn->setVisible(showClose);
+    };
+
+    auto showTableOrMsg = [&](bool showTable, const QString &msg = QString()) {
+        table->setVisible(showTable);
+        info->setVisible(showTable);
+        msgLabel->setVisible(!showTable);
+        if (!showTable) msgLabel->setText(msg);
+    };
+
+    QObject::connect(locBtn, &QPushButton::clicked, [&]() {
+        QProcess::startDetached("cmd", QStringList() << "/c" << "start ms-settings:privacy-location");
+    });
+
+    scanWifi = [&]() {
+        table->clearContents();
+        table->setRowCount(0);
+        msgLabel->clear();
+
+        // Check for active WiFi adapter first
+        bool wifiFound = false;
+        for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+            if (iface.flags().testFlag(QNetworkInterface::IsUp) &&
+                iface.flags().testFlag(QNetworkInterface::IsRunning) &&
+                !iface.flags().testFlag(QNetworkInterface::IsLoopBack) &&
+                iface.humanReadableName().toLower().contains("wi-fi")) {
+                wifiFound = true;
+                break;
+            }
+        }
+        if (!wifiFound) {
+            showTableOrMsg(false, "No active WiFi card found.");
+            showButtons(true, false, true);
+            autoTimer->stop();
+            return;
+        }
+
+        QProcess proc;
+        proc.start("netsh", QStringList() << "wlan" << "show" << "networks" << "mode=bssid");
+        proc.waitForFinished(2000);
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+        if (output.contains("location permission", Qt::CaseInsensitive) ||
+            output.contains("requires elevation", Qt::CaseInsensitive) ||
+            output.contains("Location services", Qt::CaseInsensitive)) {
+            showTableOrMsg(false,
+                "Due to Microsoft policies, you cannot scan for WiFi without enabling Location Services.<br>"
+                "Press the button below to open Location Services and enable the service for apps."
+            );
+            showButtons(true, true, true);
+            autoTimer->stop();
+            return;
+        }
+
+        // --- Robust parsing for multiple SSIDs and BSSIDs ---
+        table->setColumnCount(4);
+        table->setHorizontalHeaderLabels(QStringList() << "SSID" << "BSSID" << "Signal (dBm)" << "Channel");
+        QString currentSSID;
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        int found = 0;
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
+            if (line.startsWith("SSID ")) {
+                int idx = line.indexOf(" : ");
+                if (idx != -1)
+                    currentSSID = line.mid(idx + 3).trimmed();
+            }
+            if (line.startsWith("BSSID ")) {
+                QString bssid, signal, channel;
+                int idx = line.indexOf(" : ");
+                if (idx != -1)
+                    bssid = line.mid(idx + 3).trimmed();
+                // Look ahead for signal and channel
+                int j = i + 1;
+                while (j < lines.size()) {
+                    QString l2 = lines[j].trimmed();
+                    if (l2.startsWith("BSSID ") || l2.startsWith("SSID ")) break;
+                    if (l2.startsWith("Signal")) {
+                        int idx2 = l2.indexOf(" : ");
+                        if (idx2 != -1) {
+                            QString percent = l2.mid(idx2 + 3).trimmed();
+                            percent.chop(1); // Remove '%'
+                            bool ok = false;
+                            int pct = percent.toInt(&ok);
+                            int dbm = ok ? (pct / 2) - 100 : 0; // Approximate formula
+                            signal = QString("%1 dBm").arg(dbm);
+                        }
+                    }
+                    if (l2.startsWith("Channel")) {
+                        int idx2 = l2.indexOf(" : ");
+                        if (idx2 != -1)
+                            channel = l2.mid(idx2 + 3).trimmed();
+                    }
+                    ++j;
+                }
+                int row = table->rowCount();
+                table->insertRow(row);
+
+                QFont boldFont = table->font();
+                boldFont.setBold(true);
+
+                QFontMetrics fm(boldFont);
+                QString elidedSSID = fm.elidedText(currentSSID, Qt::ElideRight, table->columnWidth(0) - 8);
+                QString elidedBSSID = fm.elidedText(bssid, Qt::ElideRight, table->columnWidth(1) - 8);
+
+                QTableWidgetItem *ssidItem = new QTableWidgetItem(elidedSSID);
+                ssidItem->setFont(boldFont);
+                ssidItem->setToolTip(currentSSID);
+                table->setItem(row, 0, ssidItem);
+
+                QTableWidgetItem *bssidItem = new QTableWidgetItem(elidedBSSID);
+                bssidItem->setFont(boldFont);
+                bssidItem->setToolTip(bssid);
+                table->setItem(row, 1, bssidItem);
+
+                QTableWidgetItem *signalItem = new QTableWidgetItem(signal);
+                signalItem->setFont(boldFont);
+                table->setItem(row, 2, signalItem);
+
+                QTableWidgetItem *channelItem = new QTableWidgetItem(channel);
+                table->setItem(row, 3, channelItem);
+
+                found++;
+            }
+        }
+
+        if (found > 0) {
+            showTableOrMsg(true);
+            showButtons(false, false, true);
+            if (!autoTimer->isActive())
+                autoTimer->start();
+        } else {
+            showTableOrMsg(false, "No WiFi networks found.");
+            showButtons(true, false, true);
+            autoTimer->stop();
+        }
+    };
+
+    scanWifi();
+
+    QObject::connect(autoTimer, &QTimer::timeout, scanWifi);
+    QObject::connect(refreshBtn, &QPushButton::clicked, scanWifi);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    autoTimer->stop();
+}
+
+void showNetUsageDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Network usage");
+    dlg.setFixedSize(420, 130);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(8, 8, 8, 8);
+
+    QLabel *usageLabel = new QLabel("<b>Network usage</b>");
+    usageLabel->setAlignment(Qt::AlignCenter);
+    layout->addWidget(usageLabel);
+
+    QTableWidget *table = new QTableWidget(1, 2);
+    table->setHorizontalHeaderLabels(QStringList() << "Received" << "Sent");
+    QFont boldFont = table->horizontalHeader()->font();
+    boldFont.setBold(true);
+    table->horizontalHeader()->setFont(boldFont);
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setFocusPolicy(Qt::NoFocus);
+    table->setFixedHeight(48);
+    table->setFixedWidth(400);
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    layout->addWidget(table);
+
+    QPushButton *closeBtn = new QPushButton("Close");
+    layout->addWidget(closeBtn, 0, Qt::AlignHCenter);
+
+    auto formatBytes = [](quint64 bytes, int decimals = 2, int tooltipDecimals = 8) -> QPair<QString, QString> {
+        double value = bytes;
+        QString unit = "B";
+        if (value >= 1024) { value /= 1024; unit = "KB"; }
+        if (value >= 1024) { value /= 1024; unit = "MB"; }
+        if (value >= 1024) { value /= 1024; unit = "GB"; }
+        if (value >= 1024) { value /= 1024; unit = "TB"; }
+        QString shown = QString::number(value, 'f', decimals) + " " + unit;
+        QString tooltip = QString::number(value, 'f', tooltipDecimals) + " " + unit;
+        return qMakePair(shown, tooltip);
+    };
+
+    auto updateStats = [&]() {
+        QProcess proc;
+        proc.start("netstat", QStringList() << "-e");
+        proc.waitForFinished(1000);
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+
+        quint64 rx = 0, tx = 0;
+        for (const QString &line : lines) {
+            if (line.trimmed().startsWith("Bytes")) {
+                QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                if (parts.size() >= 3) {
+                    rx = parts[1].toULongLong();
+                    tx = parts[2].toULongLong();
+                }
+                break;
+            }
+        }
+
+        auto rxFmt = formatBytes(rx);
+        auto txFmt = formatBytes(tx);
+
+        table->setRowCount(1);
+        QTableWidgetItem *rxItem = new QTableWidgetItem(rxFmt.first);
+        QTableWidgetItem *txItem = new QTableWidgetItem(txFmt.first);
+
+        QBrush blueBrush(QColor("#0055aa")); // darker blue than #00ff00
+        rxItem->setForeground(blueBrush);
+        txItem->setForeground(blueBrush);
+
+        // Tooltip: bytes (no decimals), then formatted with up to 8 decimals
+        rxItem->setToolTip(QString("%1 B\n%2").arg(rx).arg(rxFmt.second));
+        txItem->setToolTip(QString("%1 B\n%2").arg(tx).arg(txFmt.second));
+        rxItem->setTextAlignment(Qt::AlignCenter);
+        txItem->setTextAlignment(Qt::AlignCenter);
+
+        table->setItem(0, 0, rxItem);
+        table->setItem(0, 1, txItem);
+    };
+
+    QTimer timer;
+    QObject::connect(&timer, &QTimer::timeout, updateStats);
+    timer.start(1000);
+    updateStats();
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    timer.stop();
+}
+
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -1421,7 +1727,9 @@ QAction *nslookupAction = netToolsMenu->addAction("NS Lookup...");
 QAction *tracertAction = netToolsMenu->addAction("Traceroute...");
 QAction *portscanAction = netToolsMenu->addAction("Port Scan...");
 QAction *dhcpStatusAction = netToolsMenu->addAction("DHCP Status...");
+QAction *netUsageAction = netToolsMenu->addAction("Network Usage...");
 QAction *arpAction = netToolsMenu->addAction("Arp...");
+QAction *wifiScanAction = netToolsMenu->addAction("WiFi Scan...");
 
 
 // Add "Always on top" toggle
@@ -1432,8 +1740,15 @@ QObject::connect(alwaysOnTopAction, &QAction::toggled, &window, [&](bool checked
     window.show();
 });
 
+QObject::connect(wifiScanAction, &QAction::triggered, [&]() { showWifiScanDialog(&window); });
+
+
 QObject::connect(arpAction, &QAction::triggered, [&]() {
     showArpDialog(&window);
+});
+
+QObject::connect(netUsageAction, &QAction::triggered, [&]() {
+    showNetUsageDialog(&window);
 });
 
 QObject::connect(flushDnsAction, &QAction::triggered, [&]() {
