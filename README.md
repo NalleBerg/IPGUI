@@ -1,9 +1,8 @@
-Version 2.5.0
+Version 2.6.1
 
 
 
-<<<<<<< HEAD
-=======
+###IPGui
 Homepage: [https://prog.nalle.no](https://prog.nalle.no/nb/home/ipgui)
 
 Download installer: https://prog.nalle.no/ipgui/
