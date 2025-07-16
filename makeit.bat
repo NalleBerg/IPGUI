@@ -15,8 +15,6 @@ C:\Qt\6.9.1\msvc2022_64\bin\windeployqt.exe  .\build\Release\IPGUI.exe
 REM Copying Standard Working gif to the build directory
 copy .\StdWorking.gif .\build\Release\StdWorking.gif
 
-REM Copying the port addresses for the port scanner.
-copy .\service-names-port-numbers.csv .\build\Release\service-names-port-numbers.csv
 
 REM Renaming the build/Release directory to IPGui
 ren .\build\Release IPGui

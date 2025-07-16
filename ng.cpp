@@ -2,11 +2,25 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 2.7.5
+// Project version: 2.9.15
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
 // Build configuration: x64 Release
+
+
+// Windows API - Must be included before Qt headers.
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
+#include <wlanapi.h>
+#include <objbase.h>
+#include <wtypes.h>
+#pragma comment(lib, "wlanapi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
+
 
 #include <QApplication>
 #include <QMainWindow>
@@ -50,7 +64,9 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QFormLayout>
-
+#include <QStandardPaths>
+#include <QDir>
+#include <QFileInfo>
 
 
 // Windows API for gateway
@@ -60,9 +76,47 @@
 
 
 //Global variables
-const QString VersionNumber = "2.7.5";
+const QString VersionNumber = "2.9.15";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
+// Helper: Get the path to the shared CSV file
+// this part belongs to the port scanner dialog
+QString getPortInfoCsvPath() {
+    // Explicitly use the Public user's AppData\Local\IPGui directory
+    QString dir = "C:/Users/Public/AppData/Local/IPGui";
+    QDir().mkpath(dir); // Ensure the directory exists
+    return dir + "/service-names-port-numbers.csv";
+}
+
+// Helper: Download the CSV to the shared location
+bool downloadPortInfoCsv(const QString &path, QWidget *parent = nullptr) {
+    QNetworkAccessManager mgr;
+    QNetworkRequest req(QUrl("https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.csv"));
+    QNetworkReply *reply = mgr.get(req);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(7000); // 7s timeout
+    loop.exec();
+    bool ok = false;
+    if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+        QByteArray data = reply->readAll();
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(data);
+            file.close();
+            ok = true;
+        }
+    }
+    reply->deleteLater();
+    if (!ok && parent) {
+        QMessageBox::warning(parent, "Port Info", "Could not download port info from IANA.");
+    }
+    return ok;
+}
+// End of helper functions
 
 // Function to get the default gateway for a given IP address
 QString getDefaultGateway(const QString& ipAddress) {
@@ -135,10 +189,10 @@ QString getDefaultGateway(const QString& ipAddress) {
     return gateway;
 }
 
-
+// Function for IP scanner dialog 
 void showNetworkScannerDialog(QWidget *parent) {
     QDialog dlg(parent);
-    dlg.setWindowTitle("Network Scanner");
+    dlg.setWindowTitle("IP Scanner");
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
     QLabel *prompt = new QLabel("Scan for devices in your local network:");
@@ -179,8 +233,11 @@ void showNetworkScannerDialog(QWidget *parent) {
     // --- Buttons ---
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *scanBtn = new QPushButton("Scan");
+    scanBtn->setToolTip("Start scanning the selected IP range for active devices.");    
     QPushButton *stopBtn = new QPushButton("Stop");
+    stopBtn->setToolTip("Stop the ongoing scan.");
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close the scanner dialog.");
     btnLayout->addWidget(scanBtn);
     btnLayout->addWidget(stopBtn);
     btnLayout->addWidget(closeBtn);
@@ -235,6 +292,8 @@ void showNetworkScannerDialog(QWidget *parent) {
                 QString host = QHostInfo::fromName(ip).hostName();
 
                 // Check for HTTPS/HTTP
+                //  I do that, so I can add a link to the device 
+                //  if it has a web interface.
                 bool hasHttps = false, hasHttp = false;
                 {
                     QTcpSocket sock;
@@ -253,6 +312,7 @@ void showNetworkScannerDialog(QWidget *parent) {
                     }
                 }
 
+                // Create a link for the IP address if it has a web interface
                 QString ipLink;
                 if (hasHttps) {
                     ipLink = QString("<a href=\"https://%1\" title=\"Open in browser\">%1</a>").arg(ip);
@@ -395,39 +455,28 @@ struct PortInfo {
     QString description;
 };
 
-// Loads the port info from IANA or local CSV, returns map: (port, proto) -> PortInfo
+// Loads the port info from local CSV (downloads if missing/old), returns map: (port, proto) -> PortInfo
 QMap<QPair<int, QString>, PortInfo> loadPortInfoCSV(QWidget *parent = nullptr) {
     QMap<QPair<int, QString>, PortInfo> portMap;
-    QString csvData;
-    // Try to download from IANA
-    QNetworkAccessManager mgr;
-    QNetworkRequest req(QUrl("https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.csv"));
-    QNetworkReply *reply = mgr.get(req);
-    QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timer.start(3000); // 3s timeout
-    loop.exec();
-    if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
-        csvData = reply->readAll();
+    QString csvPath = getPortInfoCsvPath();
+    QFileInfo fi(csvPath);
+
+    // Download if missing or older than 7 days
+    bool needDownload = !fi.exists() || fi.lastModified().daysTo(QDateTime::currentDateTime()) > 7;
+    if (needDownload) {
+        downloadPortInfoCsv(csvPath, parent);
     }
-    reply->deleteLater();
-    if (csvData.isEmpty()) {
-        // Fallback to local file
-        QFile file("service-names-port-numbers.csv");
-        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&file);
-            csvData = in.readAll();
-            file.close();
-        }
-    }
-    if (csvData.isEmpty()) {
+
+    QFile file(csvPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         if (parent)
-            QMessageBox::warning(parent, "Port Info", "Could not load port info from IANA or local file.");
+            QMessageBox::warning(parent, "Port Info", "Could not load port info from local file.");
         return portMap;
     }
+    QTextStream in(&file);
+    QString csvData = in.readAll();
+    file.close();
+
     // Parse CSV
     QStringList lines = csvData.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
     if (lines.isEmpty()) return portMap;
@@ -465,8 +514,12 @@ void showPortScanDialog(QWidget *parent) {
 
     QLabel *inputLabel = new QLabel("Target (IP or hostname):");
     QLineEdit *targetEdit = new QLineEdit("127.0.0.1");
+    targetEdit->setToolTip("Enter the IP address or hostname to scan.");
     QLabel *rangeLabel = new QLabel("Port range (e.g. 1-1024):");
     QLineEdit *rangeEdit = new QLineEdit("1-1024");
+    rangeEdit->setToolTip("<div style='white-space:nowrap;'>Enter the port range to scan. You can use a format like 1-1024.<BR>"
+                           "The default is 1-1024, which is the most common range for services.<BR>"
+                           "You can also specify a single port.</div>");
     layout->addWidget(inputLabel);
     layout->addWidget(targetEdit);
     layout->addWidget(rangeLabel);
@@ -475,6 +528,7 @@ void showPortScanDialog(QWidget *parent) {
     QHBoxLayout *currentPortLayout = new QHBoxLayout();
     QLabel *checkingLabel = new QLabel("Checking port number:");
     QLineEdit *currentPortEdit = new QLineEdit;
+    currentPortEdit->setToolTip("The port that is being checked.");
     currentPortEdit->setReadOnly(true);
     currentPortEdit->setAlignment(Qt::AlignCenter);
     QFont font = currentPortEdit->font();
@@ -484,6 +538,8 @@ void showPortScanDialog(QWidget *parent) {
     currentPortEdit->setFixedWidth(100);
 
     QLabel *progressLabel = new QLabel("0 % done");
+    progressLabel->setToolTip("<div style='white-space:nowrap;'>Progress of the scan in percent.<BR>"
+                              "This will update as ports are checked.</div>");
     progressLabel->setFixedWidth(120);
     progressLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
 
@@ -493,6 +549,7 @@ void showPortScanDialog(QWidget *parent) {
     layout->addLayout(currentPortLayout);
 
     QLabel *etaLabel = new QLabel("Estimated time remaining: --");
+    etaLabel->setToolTip("Estimated time remaining for your scan to complete.");
     etaLabel->setMinimumWidth(320);
     etaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     etaLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
@@ -503,22 +560,38 @@ void showPortScanDialog(QWidget *parent) {
     output->setLineWrapMode(QTextEdit::NoWrap);
     output->setMinimumHeight(120);
     layout->addWidget(output);
+QHBoxLayout *btnLayout = new QHBoxLayout();
+QPushButton *scanBtn = new QPushButton("Scan");
+scanBtn->setToolTip("Start scanning the specified port range on the target.");
+QPushButton *stopCloseBtn = new QPushButton("Close");
+stopCloseBtn->setToolTip("Close the dialog.");
+btnLayout->addWidget(scanBtn);
+btnLayout->addWidget(stopCloseBtn);
+layout->addLayout(btnLayout);
 
-    QHBoxLayout *btnLayout = new QHBoxLayout();
-    QPushButton *scanBtn = new QPushButton("Scan");
-    QPushButton *stopCloseBtn = new QPushButton("Close");
-    btnLayout->addWidget(scanBtn);
-    btnLayout->addWidget(stopCloseBtn);
-    layout->addLayout(btnLayout);
+// State
+auto scanRunning = std::make_shared<bool>(false);
 
-    // State
-    auto scanRunning = std::make_shared<bool>(false);
+// Helper to update Stop/Close button text
+auto updateStopCloseText = [&]() {
+    if (*scanRunning) {
+        stopCloseBtn->setText("Stop");
+        stopCloseBtn->setToolTip("Stop current scan");
+    } else {
+        stopCloseBtn->setText("Close");
+        stopCloseBtn->setToolTip("Close the dialog");
+    }
+};
+updateStopCloseText();
 
-    // Helper to update Stop/Close button text
-    auto updateStopCloseText = [=]() {
-        stopCloseBtn->setText(*scanRunning ? "Stop" : "Close");
-    };
+// Example usage in your scan logic:
+QObject::connect(scanBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
+    *scanRunning = true;
     updateStopCloseText();
+    // ... start scan ...
+});
+
+
 
     // Load port info once per scan
     static QMap<QPair<int, QString>, PortInfo> portInfoMap;
@@ -638,27 +711,22 @@ void showPortScanDialog(QWidget *parent) {
         scanNextPort();
     });
 
-    QObject::connect(stopCloseBtn, &QPushButton::clicked, [=]() mutable {
-        if (*scanRunning) {
-            // Stop the scan
-            *scanRunning = false;
-            scanBtn->setEnabled(true);
-            progressLabel->setText("0 % done");
-            etaLabel->setText("Estimated time remaining: --");
-            output->append("<b>Scan stopped.</b>");
-            currentPortEdit->clear();
-            updateStopCloseText();
-            QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after stop
-        } else {
-            dlg->close();
-        }
-    });
-
-    // If user closes the dialog window, also stop scan
-    QObject::connect(dlg, &QDialog::rejected, [=]() mutable {
+    QObject::connect(stopCloseBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
+    if (*scanRunning) {
+        // Stop the scan, but do NOT close the dialog
         *scanRunning = false;
-        QObject::disconnect(timer, nullptr, nullptr, nullptr);
-    });
+        scanBtn->setEnabled(true);
+        progressLabel->setText("0 % done");
+        etaLabel->setText("Estimated time remaining: --");
+        output->append("<b>Scan stopped.</b>");
+        currentPortEdit->clear();
+        updateStopCloseText();
+        QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after stop
+        return; // <--- This prevents the dialog from closing!
+    }
+    // Only close the dialog if not scanning
+    dlg->close();
+});
 
     dlg->adjustSize();
     dlg->exec();
@@ -684,6 +752,7 @@ void showTracerouteDialog(QWidget *parent) {
     QHBoxLayout *hopsLayout = new QHBoxLayout();
     QLabel *hopsLabel = new QLabel("Max hops:");
     QSpinBox *hopsSpin = new QSpinBox;
+    hopsSpin->setToolTip("Maximum number of hops to trace. Default is 30.");
     hopsSpin->setRange(1, 64);
     hopsSpin->setValue(30);
     hopsLayout->addWidget(hopsLabel);
@@ -698,8 +767,12 @@ void showTracerouteDialog(QWidget *parent) {
 
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *traceBtn = new QPushButton("Start");
+    traceBtn->setToolTip("Start the traceroute to the specified host.");
     QPushButton *stopCloseBtn = new QPushButton("Close");
+    stopCloseBtn->setToolTip("Stop the traceroute or close the dialog.");
     QPushButton *bottomBtn = new QPushButton("Bottom");
+    bottomBtn->setToolTip("Scroll to the bottom of the output.");
+    // bottomBtn->setEnabled(false);
     btnLayout->addWidget(traceBtn);
     btnLayout->addWidget(stopCloseBtn);
     btnLayout->addWidget(bottomBtn);
@@ -711,10 +784,15 @@ void showTracerouteDialog(QWidget *parent) {
     QPointer<QDialog> scanningDlg = nullptr;
 
     // Helper to update Stop/Close button text
-    auto updateStopCloseText = [&]() {
-        stopCloseBtn->setText(isTracing ? "Stop" : "Close");
-    };
-    updateStopCloseText();
+   auto updateStopCloseText = [&]() {
+    if (isTracing) {
+        stopCloseBtn->setText("Stop");
+        stopCloseBtn->setToolTip("Stop the traceroute");
+    } else {
+        stopCloseBtn->setText("Close");
+        stopCloseBtn->setToolTip("Close the dialog");
+    }
+};
 
     QObject::connect(traceBtn, &QPushButton::clicked, [&]() {
         QString host = input->text().trimmed();
@@ -927,13 +1005,43 @@ void showDhcpStatusDialog(QWidget *parent = nullptr) {
 }
 
 void showNslookupDialog(QWidget *parent = nullptr) {
-    bool ok;
-    QString host = QInputDialog::getText(parent, "NS Lookup", "Enter hostname or IP:", QLineEdit::Normal, "", &ok);
-    if (!ok || host.trimmed().isEmpty())
+    // Custom input dialog with tooltip and custom button text
+    QDialog inputDlg(parent);
+    inputDlg.setWindowTitle("NS Lookup");
+    QVBoxLayout vbox(&inputDlg);
+
+    QLabel prompt("Enter hostname or IP:");
+    vbox.addWidget(&prompt);
+
+    QLineEdit inputEdit;
+    inputEdit.setPlaceholderText("e.g. www.google.com or 8.8.8.8");
+    inputEdit.setToolTip("Enter a hostname (like www.google.com) or an IP address to look up.");
+    vbox.addWidget(&inputEdit);
+
+    QHBoxLayout btnBox;
+    QPushButton okBtn("Look it up");
+    okBtn.setToolTip("Start the DNS lookup for the entered hostname or IP.");
+    QPushButton cancelBtn("Cancel");
+    cancelBtn.setToolTip("Cancel and close this dialog.");
+    btnBox.addWidget(&okBtn);
+    btnBox.addWidget(&cancelBtn);
+    vbox.addLayout(&btnBox);
+
+    okBtn.setEnabled(false);
+
+    QObject::connect(&inputEdit, &QLineEdit::textChanged, [&]() {
+        okBtn.setEnabled(!inputEdit.text().trimmed().isEmpty());
+    });
+    QObject::connect(&okBtn, &QPushButton::clicked, &inputDlg, &QDialog::accept);
+    QObject::connect(&cancelBtn, &QPushButton::clicked, &inputDlg, &QDialog::reject);
+
+    if (inputDlg.exec() != QDialog::Accepted)
         return;
 
+    QString host = inputEdit.text().trimmed();
+
     QProcess proc;
-    proc.start("nslookup", QStringList() << host.trimmed());
+    proc.start("nslookup", QStringList() << host);
     proc.waitForFinished();
     QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
 
@@ -1073,6 +1181,7 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     layout.addWidget(label);
 
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close this dialog");
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     layout.addWidget(closeBtn);
 
@@ -1097,12 +1206,8 @@ void showArpDialog(QWidget *parent = nullptr) {
     delLayout->addWidget(delBtn);
     layout->addLayout(delLayout);
 
-    // Tooltip with yellow background, two lines
-    ipEdit->setToolTip(
-        "<div style='background-color:yellow; color:black; padding:4px;'>"
-        "Insert IP from the arp table<br>or leave as it is to delete all arp entries"
-        "</div>"
-    );
+    // Tooltip, two lines
+    ipEdit->setToolTip("Insert IP from the ARP table<br>or leave as it is to delete all ARP entries");
 
     // --- Table ---
     QTableWidget *table = new QTableWidget();
@@ -1129,6 +1234,11 @@ void showArpDialog(QWidget *parent = nullptr) {
     btnLayout->addWidget(closeBtn);
     btnLayout->addStretch();
     layout->addLayout(btnLayout);
+
+    // Adding tooltips
+    advBtn->setToolTip("Toggle between advanced and basic ARP table views");
+    refreshBtn->setToolTip("Refresh the ARP table");
+    closeBtn->setToolTip("Close the ARP table");
 
     // --- Helper to fill table from arp output and resize dialog ---
     auto adjustWidths = [&]() {
@@ -1220,8 +1330,6 @@ void showWifiScanDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("WiFi Networks");
     dlg.setFixedWidth(650);
-    dlg.setMaximumWidth(650);
-    dlg.setMinimumWidth(650);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
@@ -1241,7 +1349,8 @@ void showWifiScanDialog(QWidget *parent) {
 
     QTableWidget *table = new QTableWidget();
     table->setColumnCount(4);
-    table->setHorizontalHeaderLabels(QStringList() << "SSID" << "BSSID" << "Signal (dBm)" << "Channel");
+    QStringList headers = {"SSID", "BSSID", "Signal (dBm)", "Channel"};
+    table->setHorizontalHeaderLabels(headers);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionBehavior(QAbstractItemView::SelectItems);
     table->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -1250,38 +1359,37 @@ void showWifiScanDialog(QWidget *parent) {
     table->setMinimumWidth(630);
     table->setFixedWidth(630);
 
-    // Set fixed column widths so table never expands
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-    table->setColumnWidth(0, 210); // SSID
-    table->setColumnWidth(1, 210); // BSSID
-    table->setColumnWidth(2, 110); // Signal
-    table->setColumnWidth(3, 90);  // Channel
-
-    // Force horizontal scroll bar if needed, never expand
+    table->setColumnWidth(0, 210);
+    table->setColumnWidth(1, 210);
+    table->setColumnWidth(2, 110);
+    table->setColumnWidth(3, 90);
     table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
 
     layout->addWidget(table);
 
     QPushButton *refreshBtn = new QPushButton("Refresh");
-    QPushButton *locBtn = new QPushButton("Open Location Settings");
     QPushButton *closeBtn = new QPushButton("Close");
     QHBoxLayout *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
     btnLayout->addWidget(refreshBtn);
-    btnLayout->addWidget(locBtn);
     btnLayout->addWidget(closeBtn);
     btnLayout->addStretch();
     layout->addLayout(btnLayout);
 
-    QTimer *autoTimer = new QTimer(&dlg);
-    autoTimer->setInterval(1000);
+    // Sorting state
+    int sortColumn = 2; // Default: Signal
+    Qt::SortOrder sortOrder = Qt::DescendingOrder;
 
-    std::function<void()> scanWifi;
-
-    auto showButtons = [&](bool showRefresh, bool showLoc, bool showClose) {
-        refreshBtn->setVisible(showRefresh);
-        locBtn->setVisible(showLoc);
-        closeBtn->setVisible(showClose);
+    // Helper to set header arrows
+    auto updateHeaderArrows = [&]() {
+        for (int i = 0; i < headers.size(); ++i) {
+            QString label = headers[i];
+            if (i == sortColumn) {
+                label += (sortOrder == Qt::AscendingOrder) ? " ▲" : " ▼";
+            }
+            table->horizontalHeaderItem(i)->setText(label);
+        }
     };
 
     auto showTableOrMsg = [&](bool showTable, const QString &msg = QString()) {
@@ -1291,139 +1399,163 @@ void showWifiScanDialog(QWidget *parent) {
         if (!showTable) msgLabel->setText(msg);
     };
 
-    QObject::connect(locBtn, &QPushButton::clicked, [&]() {
-        QProcess::startDetached("cmd", QStringList() << "/c" << "start ms-settings:privacy-location");
-    });
+    // Store last scan results for sorting
+    struct WifiEntry {
+        QString ssid, bssid, signal, channel;
+        int dbm;
+    };
+    QList<WifiEntry> entries;
 
-    scanWifi = [&]() {
+    auto fillTable = [&]() {
+        table->setRowCount(0);
+        // Sort entries
+        QList<WifiEntry> sorted = entries;
+        std::function<bool(const WifiEntry&, const WifiEntry&)> cmp;
+        switch (sortColumn) {
+            case 0: // SSID
+                cmp = [&](const WifiEntry &a, const WifiEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.ssid < b.ssid : a.ssid > b.ssid;
+                }; break;
+            case 1: // BSSID
+                cmp = [&](const WifiEntry &a, const WifiEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.bssid < b.bssid : a.bssid > b.bssid;
+                }; break;
+            case 2: // Signal
+                cmp = [&](const WifiEntry &a, const WifiEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.dbm < b.dbm : a.dbm > b.dbm;
+                }; break;
+            case 3: // Channel
+                cmp = [&](const WifiEntry &a, const WifiEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.channel < b.channel : a.channel > b.channel;
+                }; break;
+            default: cmp = [](const WifiEntry&, const WifiEntry&) { return false; };
+        }
+        std::sort(sorted.begin(), sorted.end(), cmp);
+
+        for (const WifiEntry &entry : sorted) {
+            int row = table->rowCount();
+            table->insertRow(row);
+
+            QFont boldFont = table->font();
+            boldFont.setBold(true);
+
+            QFontMetrics fm(boldFont);
+            QString elidedSSID = fm.elidedText(entry.ssid, Qt::ElideRight, table->columnWidth(0) - 8);
+            QString elidedBSSID = fm.elidedText(entry.bssid, Qt::ElideRight, table->columnWidth(1) - 8);
+
+            QTableWidgetItem *ssidItem = new QTableWidgetItem(elidedSSID);
+            ssidItem->setFont(boldFont);
+            ssidItem->setToolTip(entry.ssid);
+            table->setItem(row, 0, ssidItem);
+
+            QTableWidgetItem *bssidItem = new QTableWidgetItem(elidedBSSID);
+            bssidItem->setFont(boldFont);
+            bssidItem->setToolTip(entry.bssid);
+            table->setItem(row, 1, bssidItem);
+
+            QTableWidgetItem *signalItem = new QTableWidgetItem(entry.signal);
+            signalItem->setFont(boldFont);
+            table->setItem(row, 2, signalItem);
+
+            QTableWidgetItem *channelItem = new QTableWidgetItem(entry.channel);
+            table->setItem(row, 3, channelItem);
+        }
+        updateHeaderArrows();
+    };
+
+    auto scanWifi = [&]() {
         table->clearContents();
         table->setRowCount(0);
-        msgLabel->clear();
+        entries.clear();
+        showTableOrMsg(false, "Scanning, please wait...");
 
-        // Check for active WiFi adapter first
-        bool wifiFound = false;
-        for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
-            if (iface.flags().testFlag(QNetworkInterface::IsUp) &&
-                iface.flags().testFlag(QNetworkInterface::IsRunning) &&
-                !iface.flags().testFlag(QNetworkInterface::IsLoopBack) &&
-                iface.humanReadableName().toLower().contains("wi-fi")) {
-                wifiFound = true;
-                break;
-            }
-        }
-        if (!wifiFound) {
-            showTableOrMsg(false, "No active WiFi card found.");
-            showButtons(true, false, true);
-            autoTimer->stop();
+        HANDLE hClient = NULL;
+        DWORD dwMaxClient = 2;
+        DWORD dwCurVersion = 0;
+        DWORD dwResult = WlanOpenHandle(dwMaxClient, NULL, &dwCurVersion, &hClient);
+        if (dwResult != ERROR_SUCCESS) {
+            showTableOrMsg(false, "WLAN API not available.");
             return;
         }
 
-        QProcess proc;
-        proc.start("netsh", QStringList() << "wlan" << "show" << "networks" << "mode=bssid");
-        proc.waitForFinished(2000);
-        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
-
-        if (output.contains("location permission", Qt::CaseInsensitive) ||
-            output.contains("requires elevation", Qt::CaseInsensitive) ||
-            output.contains("Location services", Qt::CaseInsensitive)) {
-            showTableOrMsg(false,
-                "Due to Microsoft policies, you cannot scan for WiFi without enabling Location Services.<br>"
-                "Press the button below to open Location Services and enable the service for apps."
-            );
-            showButtons(true, true, true);
-            autoTimer->stop();
+        PWLAN_INTERFACE_INFO_LIST pIfList = NULL;
+        dwResult = WlanEnumInterfaces(hClient, NULL, &pIfList);
+        if (dwResult != ERROR_SUCCESS || !pIfList || pIfList->dwNumberOfItems == 0) {
+            showTableOrMsg(false, "No WiFi interface found.");
+            WlanCloseHandle(hClient, NULL);
             return;
         }
 
-        // --- Robust parsing for multiple SSIDs and BSSIDs ---
-        table->setColumnCount(4);
-        table->setHorizontalHeaderLabels(QStringList() << "SSID" << "BSSID" << "Signal (dBm)" << "Channel");
-        QString currentSSID;
-        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
-        int found = 0;
-        for (int i = 0; i < lines.size(); ++i) {
-            QString line = lines[i].trimmed();
-            if (line.startsWith("SSID ")) {
-                int idx = line.indexOf(" : ");
-                if (idx != -1)
-                    currentSSID = line.mid(idx + 3).trimmed();
+        for (unsigned int i = 0; i < pIfList->dwNumberOfItems; ++i) {
+            PWLAN_INTERFACE_INFO pIfInfo = &pIfList->InterfaceInfo[i];
+            WlanScan(hClient, &pIfInfo->InterfaceGuid, NULL, NULL, NULL);
+
+            PWLAN_BSS_LIST pBssList = NULL;
+            DWORD bssResult = WlanGetNetworkBssList(
+                hClient, &pIfInfo->InterfaceGuid, NULL, dot11_BSS_type_any, FALSE, NULL, &pBssList);
+            if (bssResult != ERROR_SUCCESS || !pBssList) continue;
+
+            for (unsigned int j = 0; j < pBssList->dwNumberOfItems; ++j) {
+                WLAN_BSS_ENTRY &bss = pBssList->wlanBssEntries[j];
+                QString ssid = QString::fromUtf8(reinterpret_cast<const char*>(bss.dot11Ssid.ucSSID), bss.dot11Ssid.uSSIDLength);
+
+                QString bssidStr = QString("%1:%2:%3:%4:%5:%6")
+                    .arg(QString::number(bss.dot11Bssid[0], 16).rightJustified(2, '0'))
+                    .arg(QString::number(bss.dot11Bssid[1], 16).rightJustified(2, '0'))
+                    .arg(QString::number(bss.dot11Bssid[2], 16).rightJustified(2, '0'))
+                    .arg(QString::number(bss.dot11Bssid[3], 16).rightJustified(2, '0'))
+                    .arg(QString::number(bss.dot11Bssid[4], 16).rightJustified(2, '0'))
+                    .arg(QString::number(bss.dot11Bssid[5], 16).rightJustified(2, '0'))
+                    .toUpper();
+
+                int dbm = int(bss.lRssi);
+                QString signal = QString("%1 dBm").arg(dbm);
+
+                int channel = 0;
+                if (bss.ulChCenterFrequency > 0)
+                    channel = int((bss.ulChCenterFrequency / 1000 - 2407) / 5);
+
+                entries.append({ssid, bssidStr, signal, channel > 0 ? QString::number(channel) : "-" , dbm});
             }
-            if (line.startsWith("BSSID ")) {
-                QString bssid, signal, channel;
-                int idx = line.indexOf(" : ");
-                if (idx != -1)
-                    bssid = line.mid(idx + 3).trimmed();
-                // Look ahead for signal and channel
-                int j = i + 1;
-                while (j < lines.size()) {
-                    QString l2 = lines[j].trimmed();
-                    if (l2.startsWith("BSSID ") || l2.startsWith("SSID ")) break;
-                    if (l2.startsWith("Signal")) {
-                        int idx2 = l2.indexOf(" : ");
-                        if (idx2 != -1) {
-                            QString percent = l2.mid(idx2 + 3).trimmed();
-                            percent.chop(1); // Remove '%'
-                            bool ok = false;
-                            int pct = percent.toInt(&ok);
-                            int dbm = ok ? (pct / 2) - 100 : 0; // Approximate formula
-                            signal = QString("%1 dBm").arg(dbm);
-                        }
-                    }
-                    if (l2.startsWith("Channel")) {
-                        int idx2 = l2.indexOf(" : ");
-                        if (idx2 != -1)
-                            channel = l2.mid(idx2 + 3).trimmed();
-                    }
-                    ++j;
-                }
-                int row = table->rowCount();
-                table->insertRow(row);
-
-                QFont boldFont = table->font();
-                boldFont.setBold(true);
-
-                QFontMetrics fm(boldFont);
-                QString elidedSSID = fm.elidedText(currentSSID, Qt::ElideRight, table->columnWidth(0) - 8);
-                QString elidedBSSID = fm.elidedText(bssid, Qt::ElideRight, table->columnWidth(1) - 8);
-
-                QTableWidgetItem *ssidItem = new QTableWidgetItem(elidedSSID);
-                ssidItem->setFont(boldFont);
-                ssidItem->setToolTip(currentSSID);
-                table->setItem(row, 0, ssidItem);
-
-                QTableWidgetItem *bssidItem = new QTableWidgetItem(elidedBSSID);
-                bssidItem->setFont(boldFont);
-                bssidItem->setToolTip(bssid);
-                table->setItem(row, 1, bssidItem);
-
-                QTableWidgetItem *signalItem = new QTableWidgetItem(signal);
-                signalItem->setFont(boldFont);
-                table->setItem(row, 2, signalItem);
-
-                QTableWidgetItem *channelItem = new QTableWidgetItem(channel);
-                table->setItem(row, 3, channelItem);
-
-                found++;
-            }
+            if (pBssList) WlanFreeMemory(pBssList);
         }
+        if (pIfList) WlanFreeMemory(pIfList);
+        WlanCloseHandle(hClient, NULL);
 
-        if (found > 0) {
+        if (!entries.isEmpty()) {
             showTableOrMsg(true);
-            showButtons(false, false, true);
-            if (!autoTimer->isActive())
-                autoTimer->start();
+            fillTable();
         } else {
             showTableOrMsg(false, "No WiFi networks found.");
-            showButtons(true, false, true);
-            autoTimer->stop();
         }
     };
 
-    scanWifi();
+    // Sorting: handle header clicks
+    QObject::connect(table->horizontalHeader(), &QHeaderView::sectionClicked, [&](int col) {
+        if (sortColumn == col) {
+            sortOrder = (sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+        } else {
+            sortColumn = col;
+            sortOrder = (col == 2) ? Qt::DescendingOrder : Qt::AscendingOrder; // Default: Signal desc, others asc
+        }
+        fillTable();
+    });
 
-    QObject::connect(autoTimer, &QTimer::timeout, scanWifi);
+    // Manual refresh
     QObject::connect(refreshBtn, &QPushButton::clicked, scanWifi);
+
+    // Close
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    // Auto-refresh: simulate refresh after 0.5s, then every 2s
+    QTimer *autoTimer = new QTimer(&dlg);
+    autoTimer->setInterval(2000);
+    QObject::connect(autoTimer, &QTimer::timeout, scanWifi);
+
+    QTimer::singleShot(500, [&]() {
+        refreshBtn->click();
+        autoTimer->start();
+    });
 
     dlg.exec();
     autoTimer->stop();
@@ -1456,7 +1588,10 @@ void showNetUsageDialog(QWidget *parent) {
     layout->addWidget(table);
 
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close this dialog");
     layout->addWidget(closeBtn, 0, Qt::AlignHCenter);
+
+    // Add
 
     auto formatBytes = [](quint64 bytes, int decimals = 2, int tooltipDecimals = 8) -> QPair<QString, QString> {
         double value = bytes;
@@ -1496,7 +1631,7 @@ void showNetUsageDialog(QWidget *parent) {
         QTableWidgetItem *rxItem = new QTableWidgetItem(rxFmt.first);
         QTableWidgetItem *txItem = new QTableWidgetItem(txFmt.first);
 
-        QBrush blueBrush(QColor("#0055aa")); // darker blue than #00ff00
+        QBrush blueBrush(QColor("#1c2684")); // deep blue
         rxItem->setForeground(blueBrush);
         txItem->setForeground(blueBrush);
 
@@ -1519,6 +1654,182 @@ void showNetUsageDialog(QWidget *parent) {
 
     dlg.exec();
     timer.stop();
+}
+
+void showNetworkAdaptersDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Network Adapters");
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QTableWidget *table = new QTableWidget();
+    table->setColumnCount(5);
+    table->setHorizontalHeaderLabels(QStringList()
+        << "Adapter Name"
+        << "Type"
+        << "MAC Address"
+        << "Flags"
+        << "Description"
+    );
+    for (int i = 0; i < 5; ++i)
+        table->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    layout->addWidget(table);
+
+    // Make header bold
+    QFont headerFont = table->horizontalHeader()->font();
+    headerFont.setBold(true);
+    table->horizontalHeader()->setFont(headerFont);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *rescanBtn = new QPushButton("Rescan");
+    rescanBtn->setToolTip("Manually rescan the network adapters");
+    QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close the dialog");   
+    btnLayout->addStretch();
+    btnLayout->addWidget(rescanBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
+
+    // Simple type detection (no VPN logic)
+    auto typeToString = [](const QNetworkInterface &iface, const QString &desc) {
+        QString name = iface.humanReadableName().toLower();
+        QString d = desc.toLower();
+        if (name.contains("wi-fi") || name.contains("wifi") || name.contains("wlan"))
+            return "Wi-Fi";
+        if (name.contains("ethernet") || name.contains("lan"))
+            return "Ethernet";
+        if (name.contains("virtual") || d.contains("virtual"))
+            return "Virtual";
+        if (name.contains("ppp") || d.contains("ppp"))
+            return "PPP";
+        return "Unknown";
+    };
+
+    auto flagsToString = [](QFlags<QNetworkInterface::InterfaceFlag> flags) {
+        QStringList list;
+        if (flags & QNetworkInterface::IsUp) list << "Up";
+        if (flags & QNetworkInterface::IsRunning) list << "Running";
+        if (flags & QNetworkInterface::IsLoopBack) list << "Loopback";
+        if (flags & QNetworkInterface::IsPointToPoint) list << "P2P";
+        return list.join(", ");
+    };
+
+    // Windows API for description
+    auto getDescription = [](const QString &ifaceName) -> QString {
+#ifdef Q_OS_WIN
+        ULONG outBufLen = 15000;
+        IP_ADAPTER_ADDRESSES* addresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+        if (!addresses) return "";
+        QString desc;
+        DWORD dwRetVal = GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &outBufLen);
+        if (dwRetVal == NO_ERROR) {
+            for (IP_ADAPTER_ADDRESSES* aa = addresses; aa; aa = aa->Next) {
+                if (QString::fromWCharArray(aa->FriendlyName) == ifaceName) {
+                    desc = QString::fromWCharArray(aa->Description);
+                    break;
+                }
+            }
+        }
+        free(addresses);
+        return desc;
+#else
+        Q_UNUSED(ifaceName);
+        return "";
+#endif
+    };
+
+    auto fillTable = [&]() {
+        table->setRowCount(0);
+        const QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
+        for (const QNetworkInterface &iface : interfaces) {
+            QString name = iface.humanReadableName();
+            QString lname = name.toLower();
+            QString desc = getDescription(name);
+            QString ldesc = desc.toLower();
+
+            // Exclude loopback by flag or by name/description
+            if ((iface.flags() & QNetworkInterface::IsLoopBack) ||
+                lname.contains("loopback") || ldesc.contains("loopback"))
+                continue;
+
+            int row = table->rowCount();
+            table->insertRow(row);
+            QString mac = iface.hardwareAddress();
+
+            // Set deep blue color for all text in the row
+            QBrush blueBrush(QColor("#1c2684"));
+
+            auto makeItem = [&](const QString &text) {
+                QTableWidgetItem *item = new QTableWidgetItem(text);
+                item->setForeground(blueBrush);
+                return item;
+            };
+
+            table->setItem(row, 0, makeItem(name));
+            table->setItem(row, 1, makeItem(typeToString(iface, desc)));
+            table->setItem(row, 2, makeItem(mac));
+            table->setItem(row, 3, makeItem(flagsToString(iface.flags())));
+            QTableWidgetItem *descItem = makeItem(desc);
+            descItem->setToolTip(desc); // Tooltip for full description
+            table->setItem(row, 4, descItem);
+        }
+        table->resizeColumnsToContents();
+
+        // Calculate total width needed for all columns
+        int totalWidth = table->verticalHeader()->width();
+        for (int i = 0; i < table->columnCount(); ++i)
+            totalWidth += table->columnWidth(i);
+        totalWidth += table->frameWidth() * 2;
+        if (table->verticalScrollBar()->isVisible())
+            totalWidth += table->verticalScrollBar()->width();
+        totalWidth += 40; // Extra margin
+
+        // Cap width to screen size or a max (e.g. 1920)
+        int screenWidth = QApplication::primaryScreen()->availableGeometry().width();
+        int maxWidth = qMin(1920, screenWidth - 80);
+        totalWidth = qMin(totalWidth, maxWidth);
+
+        dlg.resize(totalWidth, dlg.sizeHint().height());
+    };
+
+    fillTable();
+
+    QObject::connect(rescanBtn, &QPushButton::clicked, [&]() {
+        fillTable();
+
+        // Show popup with 3s timeout and OK button
+        QDialog popup(&dlg);
+        popup.setWindowTitle("Refreshed!");
+        QVBoxLayout vbox(&popup);
+        QLabel label("<b>Adapter list refreshed!</b>");
+        label.setAlignment(Qt::AlignCenter);
+        vbox.addWidget(&label);
+
+        QPushButton okBtn("OK");
+        vbox.addWidget(&okBtn, 0, Qt::AlignCenter);
+
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &popup, &QDialog::accept);
+        QObject::connect(&okBtn, &QPushButton::clicked, &popup, &QDialog::accept);
+        timer.start(3000);
+
+        popup.setModal(true);
+        popup.adjustSize();
+        popup.exec();
+    });
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    fillTable(); // Ensure correct size on open
+    dlg.exec();
 }
 
 
@@ -1707,18 +2018,10 @@ QMenuBar *menuBar = window.menuBar();
 // Main menu
 QMenu *fileMenu = menuBar->addMenu("&Actions");
 
-// Submenu for app-specific actions
-QMenu *appMenu = fileMenu->addMenu("This app");
 
 // Add NetTools submenu
 QMenu *netToolsMenu = fileMenu->addMenu("NetTools");
 
-// Add menu actions for Basic/Advanced, Release, Renew to the submenu
-QAction *expandMenuAction = appMenu->addAction("Basic/Advanced");
-QAction *flushDnsAction = appMenu->addAction("Flush DNS");
-flushDnsAction->setToolTip("Flush the Windows DNS cache");
-QAction *releaseMenuAction = appMenu->addAction("Release IP");
-QAction *renewMenuAction = appMenu->addAction("Renew IP");
 
 // Add action to NetTools submenu
 QAction *pingAction = netToolsMenu->addAction("Ping...");
@@ -1730,14 +2033,32 @@ QAction *dhcpStatusAction = netToolsMenu->addAction("DHCP Status...");
 QAction *netUsageAction = netToolsMenu->addAction("Network Usage...");
 QAction *arpAction = netToolsMenu->addAction("Arp...");
 QAction *wifiScanAction = netToolsMenu->addAction("WiFi Scan...");
+QAction *adaptersAction = netToolsMenu->addAction("Network Adapters");
 
 
-// Add "Always on top" toggle
-QAction *alwaysOnTopAction = fileMenu->addAction("Always on top");
-alwaysOnTopAction->setCheckable(true);
-QObject::connect(alwaysOnTopAction, &QAction::toggled, &window, [&](bool checked) {
-    window.setWindowFlag(Qt::WindowStaysOnTopHint, checked);
+QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top"); // Dot first, no checkmark
+
+// Do NOT call setCheckable(true)!
+
+auto updateAlwaysOnTopText = [&]() {
+    if (window.windowFlags() & Qt::WindowStaysOnTopHint) {
+        alwaysOnTopAction->setText("🟢 Always on top");
+    } else {
+        alwaysOnTopAction->setText("◯ Always on top");
+    }
+};
+updateAlwaysOnTopText();
+
+
+QObject::connect(adaptersAction, &QAction::triggered, [&]() {
+    showNetworkAdaptersDialog(&window);
+});
+
+QObject::connect(alwaysOnTopAction, &QAction::triggered, [&]() {
+    bool onTop = !(window.windowFlags() & Qt::WindowStaysOnTopHint);
+    window.setWindowFlag(Qt::WindowStaysOnTopHint, onTop);
     window.show();
+    updateAlwaysOnTopText();
 });
 
 QObject::connect(wifiScanAction, &QAction::triggered, [&]() { showWifiScanDialog(&window); });
@@ -1751,14 +2072,6 @@ QObject::connect(netUsageAction, &QAction::triggered, [&]() {
     showNetUsageDialog(&window);
 });
 
-QObject::connect(flushDnsAction, &QAction::triggered, [&]() {
-    int result = QProcess::execute("ipconfig", QStringList() << "/flushdns");
-    if (result == 0)
-        QMessageBox::information(nullptr, "Flush DNS", "DNS cache flushed.");
-    else
-        QMessageBox::warning(nullptr, "Flush DNS", "Failed to flush DNS cache.");
-});
-
 // Connect the NS Lookup action
     QObject::connect(nslookupAction, &QAction::triggered, [&]() {
     showNslookupDialog(&window); // or your main window pointer
@@ -1769,10 +2082,6 @@ QObject::connect(dhcpStatusAction, &QAction::triggered, [&]() {
     showDhcpStatusDialog(&window); // or your main window pointer
 });
 
-// Connect menu actions to the same slots/lambdas as the buttons
-QObject::connect(expandMenuAction, &QAction::triggered, [&]() { expandBtn->click(); });
-QObject::connect(releaseMenuAction, &QAction::triggered, [&]() { releaseBtn->click(); });
-QObject::connect(renewMenuAction, &QAction::triggered, [&]() { renewBtn->click(); });
 
 QObject::connect(portscanAction, &QAction::triggered, [&]() {
     showPortScanDialog(&window);
@@ -1805,8 +2114,11 @@ QObject::connect(pingAction, &QAction::triggered, [&]() {
 
     QHBoxLayout btnLayout;
     QPushButton pingBtn("Start");
+    pingBtn.setToolTip("Start the ping to the specified host.");
     QPushButton stopCloseBtn("Close");
+    stopCloseBtn.setToolTip("Close the dialog.");
     QPushButton bottomBtn("Bottom");
+    bottomBtn.setToolTip("Scroll to the bottom of the output.");
     btnLayout.addWidget(&pingBtn);
     btnLayout.addWidget(&stopCloseBtn);
     btnLayout.addWidget(&bottomBtn);
@@ -1851,10 +2163,17 @@ QObject::connect(pingAction, &QAction::triggered, [&]() {
 
     // Helper to update Stop/Close button text
     auto updateStopCloseText = [&]() {
-        stopCloseBtn.setText(isPinging ? "Stop" : "Close");
+    if (isPinging) {
+        stopCloseBtn.setText("Stop");
+        stopCloseBtn.setToolTip("Stop the ping");
+    } else {
+        stopCloseBtn.setText("Close");
+        stopCloseBtn.setToolTip("Close the dialog");
+    }
     };
     updateStopCloseText();
 
+    // Use this function to stop pinging
     auto stopPinging = [&]() {
         pingTimer.stop();
         if (pingProc) {
@@ -1867,30 +2186,31 @@ QObject::connect(pingAction, &QAction::triggered, [&]() {
         updateStopCloseText();
     };
 
+    // Connect Start button
     QObject::connect(&pingBtn, &QPushButton::clicked, [&]() {
-        QString host = input.text().trimmed();
-        if (host.isEmpty()) {
-            output.setPlainText("Please enter a host or IP address.");
-            return;
-        }
-        output.clear();
-        pingBtn.setEnabled(false);
-        isPinging = true;
-        updateStopCloseText();
-        pingCount = 0;
-        counterLabel.setText("<span style='color:blue;'>Pings: 0</span>");
-        pingTimer.start(1000);
-        QMetaObject::invokeMethod(&pingTimer, "timeout");
-    });
+    QString host = input.text().trimmed();
+    if (host.isEmpty()) {
+        QMessageBox::warning(&dlg, "Input Error", "Please enter a host or IP address to ping.");
+        return;
+    }
+    isPinging = true;
+    updateStopCloseText();
+    pingBtn.setEnabled(false);
+    pingCount = 0;
+    output.clear();
+    counterLabel.setText("<span style='color:blue;'>Pings: 0</span>");
+    pingTimer.start(1000); // Start pinging every second (adjust as needed)
+});
 
-    QObject::connect(&stopCloseBtn, &QPushButton::clicked, [&]() {
-        if (isPinging) {
-            stopPinging();
-            output.append("<b>Ping stopped.</b>");
-        } else {
-            dlg.accept();
-        }
-    });
+// Connect Stop/Close button
+QObject::connect(&stopCloseBtn, &QPushButton::clicked, [&]() {
+    if (isPinging) {
+        stopPinging();
+        output.append("<b>Ping stopped.</b>");
+    } else {
+        dlg.accept();
+    }
+});
 
     QObject::connect(&pingTimer, &QTimer::timeout, [&]() {
         if (!isPinging) return;
@@ -2095,6 +2415,7 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
         "<b>IPGui by Nalle Berg</b><br>"
         "<b>Copyleft 2025</b><br><br>"
         "A simple IP lookup/renew -tool.<br>"
+        "Including network tools of most kinds.<br>"
         "Visit my programming <a href='https://prog.nalle.no'> web page</a>.<br>"
         "&nbsp;<br>"
         "<b>Version:</b> " + VersionNumber + "<br>"
