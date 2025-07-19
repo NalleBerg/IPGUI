@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 2.9.15
+// Project version: 3.0.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -77,7 +77,7 @@
 
 
 //Global variables
-const QString VersionNumber = "2.9.15";
+const QString VersionNumber = "3.0.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -1803,63 +1803,63 @@ void showNetUsageDialog(QWidget *parent) {
     updateStats();
 
     QObject::connect(resetTripBtn, &QPushButton::clicked, [&]() {
-        while (true) {
-            bool ok = false;
-            QString timeStr = QInputDialog::getText(
-                &dlg,
-                "Trip Timer",
-                "Set trip duration (hh:mm:ss, 0 = unlimited):\n"
-                "<small>Examples: 1:00:00 = 1 hour, 0:30:00 = 30 min, 0:00:10 = 10 sec, 0 = unlimited</small>",
-                QLineEdit::Normal, "0", &ok
-            );
-            if (!ok) return;
+    while (true) {
+        bool ok = false;
+        QString timeStr = QInputDialog::getText(
+            &dlg,
+            "Trip Timer",
+            "Set trip duration (hh:mm:ss, 0 = unlimited):\n"
+            "Examples: 1:00:00 = 1 hour, 0:30:00 = 30 min, 0:00:10 = 10 sec, 0 = unlimited",
+            QLineEdit::Normal, "0", &ok
+        );
+        if (!ok) return;
 
-            int newTripDurationSecs = 0;
-            if (timeStr.trimmed() == "0") {
+        int newTripDurationSecs = 0;
+        if (timeStr.trimmed() == "0") {
+            newTripDurationSecs = 0;
+        } else {
+            QRegularExpression re(R"(^(\d{1,2}):(\d{1,2}):(\d{1,2})$)");
+            QRegularExpressionMatch m = re.match(timeStr.trimmed());
+            if (!m.hasMatch()) {
+                QMessageBox::warning(&dlg, "Format Error",
+                    "Please enter the time as hh:mm:ss (e.g. 1:00:00 for 1 hour, 0:30:00 for 30 minutes, 0:00:10 for 10 seconds, or 0 for unlimited).");
+                continue; // Prompt again
+            }
+            int h = m.captured(1).toInt();
+            int m_ = m.captured(2).toInt();
+            int s = m.captured(3).toInt();
+            if (m_ > 59 || s > 59) {
+                QMessageBox::warning(&dlg, "Format Error",
+                    "Minutes and seconds must be between 0 and 59.");
+                continue; // Prompt again
+            }
+            newTripDurationSecs = h * 3600 + m_ * 60 + s;
+            if (newTripDurationSecs == 0) {
+                // Treat as unlimited
                 newTripDurationSecs = 0;
-            } else {
-                QRegularExpression re(R"(^(\d{1,2}):(\d{1,2}):(\d{1,2})$)");
-                QRegularExpressionMatch m = re.match(timeStr.trimmed());
-                if (!m.hasMatch()) {
-                    QMessageBox::warning(&dlg, "Format Error",
-                        "Please enter the time as hh:mm:ss (e.g. 1:00:00 for 1 hour, 0:30:00 for 30 minutes, 0:00:10 for 10 seconds, or 0 for unlimited).");
-                    continue; // Prompt again
-                }
-                int h = m.captured(1).toInt();
-                int m_ = m.captured(2).toInt();
-                int s = m.captured(3).toInt();
-                if (m_ > 59 || s > 59) {
-                    QMessageBox::warning(&dlg, "Format Error",
-                        "Minutes and seconds must be between 0 and 59.");
-                    continue; // Prompt again
-                }
-                newTripDurationSecs = h * 3600 + m_ * 60 + s;
-                if (newTripDurationSecs == 0) {
-                    // Treat as unlimited
-                    newTripDurationSecs = 0;
-                }
             }
-            tripDurationSecs = newTripDurationSecs;
-
-            auto totals = getTotals();
-            tripRxBase = totals.first;
-            tripTxBase = totals.second;
-            tripStartTime = QDateTime::currentDateTime();
-            tripActive = true;
-            updateStats();
-
-            if (tripLimitTimer.isActive()) tripLimitTimer.stop();
-            if (tripDurationSecs > 0) {
-                tripLimitTimer.setSingleShot(true);
-                QObject::connect(&tripLimitTimer, &QTimer::timeout, [&]() {
-                    tripActive = false;
-                    updateStats(); // Freeze trip row and make it red
-                });
-                tripLimitTimer.start(tripDurationSecs * 1000);
-            }
-            break; // Only break if input was valid
         }
-    });
+        tripDurationSecs = newTripDurationSecs;
+
+        auto totals = getTotals();
+        tripRxBase = totals.first;
+        tripTxBase = totals.second;
+        tripStartTime = QDateTime::currentDateTime();
+        tripActive = true;
+        updateStats();
+
+        if (tripLimitTimer.isActive()) tripLimitTimer.stop();
+        if (tripDurationSecs > 0) {
+            tripLimitTimer.setSingleShot(true);
+            QObject::connect(&tripLimitTimer, &QTimer::timeout, [&]() {
+                tripActive = false;
+                updateStats(); // Freeze trip row and make it red
+            });
+            tripLimitTimer.start(tripDurationSecs * 1000);
+        }
+        break; // Only break if input was valid
+    }
+});
 
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 
