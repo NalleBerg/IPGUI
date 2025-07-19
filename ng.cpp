@@ -67,6 +67,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFileInfo>
+#include <QDesktopServices>
 
 
 // Windows API for gateway
@@ -1564,35 +1565,65 @@ void showWifiScanDialog(QWidget *parent) {
 void showNetUsageDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Network usage");
-    dlg.setFixedSize(420, 130);
+    dlg.setFixedSize(420, 170);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
     layout->setContentsMargins(8, 8, 8, 8);
 
-    QLabel *usageLabel = new QLabel("<b>Network usage</b>");
-    usageLabel->setAlignment(Qt::AlignCenter);
-    layout->addWidget(usageLabel);
+    // --- Timers block as title ---
+    QWidget *timersWidget = new QWidget;
+    QVBoxLayout *timersLayout = new QVBoxLayout(timersWidget);
+    timersLayout->setContentsMargins(0, 0, 0, 0);
+    timersLayout->setSpacing(0);
 
-    QTableWidget *table = new QTableWidget(1, 2);
-    table->setHorizontalHeaderLabels(QStringList() << "Received" << "Sent");
+    QLabel *usageLabel = new QLabel("Network usage");
+    usageLabel->setAlignment(Qt::AlignCenter);
+    usageLabel->setStyleSheet("font-weight:bold; font-size:12pt; padding-bottom:0px; margin-bottom:0px;");
+    timersLayout->addWidget(usageLabel);
+
+    timersWidget->setLayout(timersLayout);
+
+    // Center the timers block
+    QHBoxLayout *timersBlockLayout = new QHBoxLayout;
+    timersBlockLayout->addStretch();
+    timersBlockLayout->addWidget(timersWidget);
+    timersBlockLayout->addStretch();
+    layout->addLayout(timersBlockLayout);
+
+    // Table: 2 rows, 3 columns (Received, Sent, Uptime)
+    QTableWidget *table = new QTableWidget(2, 3);
+    table->setVerticalHeaderLabels(QStringList() << "Total" << "Trip Counter");
+    table->setHorizontalHeaderLabels(QStringList() << "Received" << "Sent" << "Uptime");
     QFont boldFont = table->horizontalHeader()->font();
     boldFont.setBold(true);
     table->horizontalHeader()->setFont(boldFont);
-    table->verticalHeader()->setVisible(false);
+    table->verticalHeader()->setFont(boldFont);
+    table->verticalHeader()->setToolTip("Total: Since interface started\nTrip: Since last reset");
+    table->horizontalHeader()->setToolTip("Network data in bytes and formatted units");
+    table->verticalHeader()->setVisible(true);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionMode(QAbstractItemView::NoSelection);
     table->setFocusPolicy(Qt::NoFocus);
-    table->setFixedHeight(48);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    table->setFixedHeight(80);
     table->setFixedWidth(400);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     layout->addWidget(table);
 
+    // Buttons side by side
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *resetTripBtn = new QPushButton("Reset Trip Counter");
+    resetTripBtn->setToolTip("Reset the trip counter to zero.\nUse this to measure network usage for a specific task.");
     QPushButton *closeBtn = new QPushButton("Close");
     closeBtn->setToolTip("Close this dialog");
-    layout->addWidget(closeBtn, 0, Qt::AlignHCenter);
+    btnLayout->addStretch();
+    btnLayout->addWidget(resetTripBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
 
-    // Add
-
+    // Helper to format bytes
     auto formatBytes = [](quint64 bytes, int decimals = 2, int tooltipDecimals = 8) -> QPair<QString, QString> {
         double value = bytes;
         QString unit = "B";
@@ -1605,7 +1636,21 @@ void showNetUsageDialog(QWidget *parent) {
         return qMakePair(shown, tooltip);
     };
 
-    auto updateStats = [&]() {
+    // Store trip baseline values and trip start time
+    static quint64 tripRxBase = 0, tripTxBase = 0;
+    static QDateTime tripStartTime;
+    static int tripDurationSecs = 0; // 0 = infinite
+    static QTimer tripLimitTimer;
+    static bool tripActive = true;
+    tripRxBase = 0;
+    tripTxBase = 0;
+    tripStartTime = QDateTime::currentDateTime();
+    tripDurationSecs = 0;
+    tripActive = true;
+    if (tripLimitTimer.isActive()) tripLimitTimer.stop();
+
+    // Helper to fetch current totals
+    auto getTotals = []() -> QPair<quint64, quint64> {
         QProcess proc;
         proc.start("netstat", QStringList() << "-e");
         proc.waitForFinished(1000);
@@ -1623,37 +1668,204 @@ void showNetUsageDialog(QWidget *parent) {
                 break;
             }
         }
+        return qMakePair(rx, tx);
+    };
 
+    // Helper to get the up time of the first non-loopback, up, running adapter (Windows only)
+    auto getAdapterUptime = []() -> qint64 {
+        ULONG outBufLen = 15000;
+        IP_ADAPTER_ADDRESSES* addresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+        if (!addresses) return -1;
+        DWORD dwRetVal = GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &outBufLen);
+        qint64 seconds = -1;
+        if (dwRetVal == NO_ERROR) {
+            for (IP_ADAPTER_ADDRESSES* aa = addresses; aa; aa = aa->Next) {
+                if (!(aa->OperStatus == IfOperStatusUp)) continue;
+                if (aa->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+                if (aa->TransmitLinkSpeed > 0) {
+                    seconds = GetTickCount64() / 1000;
+                    break;
+                }
+            }
+        }
+        free(addresses);
+        return seconds;
+    };
+
+    // On dialog open, set trip baseline to current values and trip start time
+    auto totals = getTotals();
+    tripRxBase = totals.first;
+    tripTxBase = totals.second;
+    tripStartTime = QDateTime::currentDateTime();
+
+    // Update stats
+    auto updateStats = [&]() {
+        auto totals = getTotals();
+        quint64 rx = totals.first;
+        quint64 tx = totals.second;
+
+        // Total row
         auto rxFmt = formatBytes(rx);
         auto txFmt = formatBytes(tx);
 
-        table->setRowCount(1);
+        QBrush blueBrush(QColor("#1c2684")); // deep blue
+        QBrush greenBrush(QColor("#1a7d2c")); // deep green
+        QBrush redBrush(QColor("#c80000"));   // red for stopped trip
+
         QTableWidgetItem *rxItem = new QTableWidgetItem(rxFmt.first);
         QTableWidgetItem *txItem = new QTableWidgetItem(txFmt.first);
-
-        QBrush blueBrush(QColor("#1c2684")); // deep blue
         rxItem->setForeground(blueBrush);
         txItem->setForeground(blueBrush);
-
-        // Tooltip: bytes (no decimals), then formatted with up to 8 decimals
-        rxItem->setToolTip(QString("%1 B\n%2").arg(rx).arg(rxFmt.second));
-        txItem->setToolTip(QString("%1 B\n%2").arg(tx).arg(txFmt.second));
+        rxItem->setToolTip(QString("Total received since interface started\n%1 B\n%2").arg(rx).arg(rxFmt.second));
+        txItem->setToolTip(QString("Total sent since interface started\n%1 B\n%2").arg(tx).arg(txFmt.second));
         rxItem->setTextAlignment(Qt::AlignCenter);
         txItem->setTextAlignment(Qt::AlignCenter);
 
+        // Total uptime
+        qint64 totalSecs = getAdapterUptime();
+        QString totalUptimeStr = (totalSecs < 0)
+            ? "Unknown"
+            : QTime(0,0).addSecs(int(totalSecs)).toString("hh:mm:ss");
+        QTableWidgetItem *totalUptimeItem = new QTableWidgetItem(totalUptimeStr);
+        totalUptimeItem->setForeground(blueBrush);
+        totalUptimeItem->setTextAlignment(Qt::AlignCenter);
+        totalUptimeItem->setToolTip("Time since the network adapter was started");
+
         table->setItem(0, 0, rxItem);
         table->setItem(0, 1, txItem);
+        table->setItem(0, 2, totalUptimeItem);
+
+        // Trip row
+        quint64 tripRx = rx >= tripRxBase ? rx - tripRxBase : 0;
+        quint64 tripTx = tx >= tripTxBase ? tx - tripTxBase : 0;
+        auto tripRxFmt = formatBytes(tripRx);
+        auto tripTxFmt = formatBytes(tripTx);
+
+        QTableWidgetItem *tripRxItem = new QTableWidgetItem(tripRxFmt.first);
+        QTableWidgetItem *tripTxItem = new QTableWidgetItem(tripTxFmt.first);
+
+        QBrush tripBrush = tripActive ? greenBrush : redBrush;
+        tripRxItem->setForeground(tripBrush);
+        tripTxItem->setForeground(tripBrush);
+        tripRxItem->setToolTip(QString("Trip received since last reset\n%1 B\n%2").arg(tripRx).arg(tripRxFmt.second));
+        tripTxItem->setToolTip(QString("Trip sent since last reset\n%1 B\n%2").arg(tripTx).arg(tripTxFmt.second));
+        tripRxItem->setTextAlignment(Qt::AlignCenter);
+        tripTxItem->setTextAlignment(Qt::AlignCenter);
+
+        // Trip uptime
+        qint64 tripSecs = tripStartTime.secsTo(QDateTime::currentDateTime());
+        if (!tripActive && tripDurationSecs > 0) tripSecs = tripDurationSecs;
+        QTableWidgetItem *tripUptimeItem = new QTableWidgetItem(QTime(0,0).addSecs(int(tripSecs)).toString("hh:mm:ss"));
+        tripUptimeItem->setForeground(tripBrush);
+        tripUptimeItem->setTextAlignment(Qt::AlignCenter);
+        tripUptimeItem->setToolTip("Time since the trip counter was last reset");
+
+        table->setItem(1, 0, tripRxItem);
+        table->setItem(1, 1, tripTxItem);
+        table->setItem(1, 2, tripUptimeItem);
     };
 
     QTimer timer;
-    QObject::connect(&timer, &QTimer::timeout, updateStats);
+    QObject::connect(&timer, &QTimer::timeout, [&]() {
+        if (tripActive) updateStats();
+        else {
+            // Only update the total row if trip is stopped
+            auto totals = getTotals();
+            quint64 rx = totals.first;
+            quint64 tx = totals.second;
+            auto rxFmt = formatBytes(rx);
+            auto txFmt = formatBytes(tx);
+            QBrush blueBrush(QColor("#1c2684"));
+            QTableWidgetItem *rxItem = new QTableWidgetItem(rxFmt.first);
+            QTableWidgetItem *txItem = new QTableWidgetItem(txFmt.first);
+            rxItem->setForeground(blueBrush);
+            txItem->setForeground(blueBrush);
+            rxItem->setTextAlignment(Qt::AlignCenter);
+            txItem->setTextAlignment(Qt::AlignCenter);
+            rxItem->setToolTip(QString("Total received since interface started\n%1 B\n%2").arg(rx).arg(rxFmt.second));
+            txItem->setToolTip(QString("Total sent since interface started\n%1 B\n%2").arg(tx).arg(txFmt.second));
+            table->setItem(0, 0, rxItem);
+            table->setItem(0, 1, txItem);
+
+            // Uptime
+            qint64 totalSecs = getAdapterUptime();
+            QString totalUptimeStr = (totalSecs < 0)
+                ? "Unknown"
+                : QTime(0,0).addSecs(int(totalSecs)).toString("hh:mm:ss");
+            QTableWidgetItem *totalUptimeItem = new QTableWidgetItem(totalUptimeStr);
+            totalUptimeItem->setForeground(blueBrush);
+            totalUptimeItem->setTextAlignment(Qt::AlignCenter);
+            totalUptimeItem->setToolTip("Time since the network adapter was started");
+            table->setItem(0, 2, totalUptimeItem);
+        }
+    });
     timer.start(1000);
     updateStats();
+
+    QObject::connect(resetTripBtn, &QPushButton::clicked, [&]() {
+        while (true) {
+            bool ok = false;
+            QString timeStr = QInputDialog::getText(
+                &dlg,
+                "Trip Timer",
+                "Set trip duration (hh:mm:ss, 0 = unlimited):\n"
+                "<small>Examples: 1:00:00 = 1 hour, 0:30:00 = 30 min, 0:00:10 = 10 sec, 0 = unlimited</small>",
+                QLineEdit::Normal, "0", &ok
+            );
+            if (!ok) return;
+
+            int newTripDurationSecs = 0;
+            if (timeStr.trimmed() == "0") {
+                newTripDurationSecs = 0;
+            } else {
+                QRegularExpression re(R"(^(\d{1,2}):(\d{1,2}):(\d{1,2})$)");
+                QRegularExpressionMatch m = re.match(timeStr.trimmed());
+                if (!m.hasMatch()) {
+                    QMessageBox::warning(&dlg, "Format Error",
+                        "Please enter the time as hh:mm:ss (e.g. 1:00:00 for 1 hour, 0:30:00 for 30 minutes, 0:00:10 for 10 seconds, or 0 for unlimited).");
+                    continue; // Prompt again
+                }
+                int h = m.captured(1).toInt();
+                int m_ = m.captured(2).toInt();
+                int s = m.captured(3).toInt();
+                if (m_ > 59 || s > 59) {
+                    QMessageBox::warning(&dlg, "Format Error",
+                        "Minutes and seconds must be between 0 and 59.");
+                    continue; // Prompt again
+                }
+                newTripDurationSecs = h * 3600 + m_ * 60 + s;
+                if (newTripDurationSecs == 0) {
+                    // Treat as unlimited
+                    newTripDurationSecs = 0;
+                }
+            }
+            tripDurationSecs = newTripDurationSecs;
+
+            auto totals = getTotals();
+            tripRxBase = totals.first;
+            tripTxBase = totals.second;
+            tripStartTime = QDateTime::currentDateTime();
+            tripActive = true;
+            updateStats();
+
+            if (tripLimitTimer.isActive()) tripLimitTimer.stop();
+            if (tripDurationSecs > 0) {
+                tripLimitTimer.setSingleShot(true);
+                QObject::connect(&tripLimitTimer, &QTimer::timeout, [&]() {
+                    tripActive = false;
+                    updateStats(); // Freeze trip row and make it red
+                });
+                tripLimitTimer.start(tripDurationSecs * 1000);
+            }
+            break; // Only break if input was valid
+        }
+    });
 
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 
     dlg.exec();
     timer.stop();
+    if (tripLimitTimer.isActive()) tripLimitTimer.stop();
 }
 
 void showNetworkAdaptersDialog(QWidget *parent) {
@@ -2400,7 +2612,90 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
 
     // Help menu
     QMenu *helpMenu = menuBar->addMenu("&Help");
+    QAction *manualAction = helpMenu->addAction("User Manual (PDF)");
     QAction *aboutAction = helpMenu->addAction("&About");
+
+    QObject::connect(manualAction, &QAction::triggered, [&window]() {
+    QString dir = "C:/Users/Public/AppData/Local/IPGui";
+    QString localPath = dir + "/IPGuiManual.pdf";
+    QString url = "https://prog.nalle.no/user/data/manual/IPGuiManual.pdf";
+
+    // Ensure directory exists
+    QDir().mkpath(dir);
+
+    // Helper: get remote file timestamp (HTTP HEAD)
+    auto getRemoteTimestamp = [](const QString &url) -> QDateTime {
+        QNetworkAccessManager mgr;
+        QNetworkRequest req(url);
+        QNetworkReply *reply = mgr.head(req);
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timer.start(5000);
+        loop.exec();
+        QDateTime dt;
+        if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+            QByteArray lastMod = reply->rawHeader("Last-Modified");
+            if (!lastMod.isEmpty()) {
+                dt = QDateTime::fromString(QString::fromLatin1(lastMod), Qt::RFC2822Date);
+                dt.setTimeSpec(Qt::UTC);
+            }
+        }
+        reply->deleteLater();
+        return dt;
+    };
+
+    // Helper: download file
+    auto downloadManual = [&](const QString &url, const QString &path) -> bool {
+        QNetworkAccessManager mgr;
+        QNetworkRequest req(url);
+        QNetworkReply *reply = mgr.get(req);
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timer.start(15000);
+        loop.exec();
+        bool ok = false;
+        if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+            QByteArray data = reply->readAll();
+            QFile file(path);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                file.write(data);
+                file.close();
+                ok = true;
+            }
+        }
+        reply->deleteLater();
+        return ok;
+    };
+
+    QFileInfo fi(localPath);
+    bool needDownload = !fi.exists();
+
+    // Check remote timestamp if file exists
+    if (!needDownload) {
+        QDateTime remote = getRemoteTimestamp(url);
+        if (remote.isValid() && fi.lastModified().toUTC() < remote) {
+            needDownload = true;
+        }
+    }
+
+    if (needDownload) {
+        if (!downloadManual(url, localPath)) {
+            QMessageBox::warning(&window, "Manual", "Could not download the latest manual.");
+            return;
+        }
+    }
+
+    // Open the PDF with the default viewer
+    QDesktopServices::openUrl(QUrl::fromLocalFile(localPath));
+});
+
+
    QObject::connect(aboutAction, &QAction::triggered, &window, [&window]() {
     QDialog dlg(&window);
     dlg.setWindowTitle("About");
