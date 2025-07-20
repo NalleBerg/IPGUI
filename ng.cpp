@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.0.0
+// Project version: 3.1.1
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -68,6 +68,22 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QDesktopServices>
+#include <lm.h>
+#include <QShortcut>
+#include <QScrollArea>
+#include <QSslSocket>
+#include <QSslCertificate>
+#include <QDialogButtonBox>
+#include <QIntValidator>
+#include <QTextEdit>
+#include <QCryptographicHash>
+#include <QVariant>
+#include <QPlainTextEdit>
+
+// Windows API for network functions Share-scanner
+#pragma comment(lib, "Netapi32.lib")
+#include <QTreeWidget>
+#include <QProgressDialog>
 
 
 // Windows API for gateway
@@ -75,9 +91,16 @@
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 
+// Helper function to add Ctrl+W shortcut to close a dialog
+inline void addCtrlWClose(QDialog *dlg) {
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, dlg, &QDialog::accept);
+}
+
 
 //Global variables
-const QString VersionNumber = "3.0.0";
+const QString VersionNumber = "3.1.1";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -255,6 +278,11 @@ void showNetworkScannerDialog(QWidget *parent) {
     output->setOpenExternalLinks(true);
     layout->addWidget(output);
 
+    // --- Ctrl+W shortcut to close dialog ---
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
+
     bool isScanning = false;
     QObject::connect(scanBtn, &QPushButton::clicked, [&]() {
         scanBtn->setEnabled(false);
@@ -293,8 +321,6 @@ void showNetworkScannerDialog(QWidget *parent) {
                 QString host = QHostInfo::fromName(ip).hostName();
 
                 // Check for HTTPS/HTTP
-                //  I do that, so I can add a link to the device 
-                //  if it has a web interface.
                 bool hasHttps = false, hasHttp = false;
                 {
                     QTcpSocket sock;
@@ -561,38 +587,44 @@ void showPortScanDialog(QWidget *parent) {
     output->setLineWrapMode(QTextEdit::NoWrap);
     output->setMinimumHeight(120);
     layout->addWidget(output);
-QHBoxLayout *btnLayout = new QHBoxLayout();
-QPushButton *scanBtn = new QPushButton("Scan");
-scanBtn->setToolTip("Start scanning the specified port range on the target.");
-QPushButton *stopCloseBtn = new QPushButton("Close");
-stopCloseBtn->setToolTip("Close the dialog.");
-btnLayout->addWidget(scanBtn);
-btnLayout->addWidget(stopCloseBtn);
-layout->addLayout(btnLayout);
 
-// State
-auto scanRunning = std::make_shared<bool>(false);
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *scanBtn = new QPushButton("Scan");
+    scanBtn->setToolTip("Start scanning the specified port range on the target.");
+    QPushButton *stopCloseBtn = new QPushButton("Close");
+    stopCloseBtn->setToolTip("Close the dialog.");
+    btnLayout->addWidget(scanBtn);
+    btnLayout->addWidget(stopCloseBtn);
+    layout->addLayout(btnLayout);
 
-// Helper to update Stop/Close button text
-auto updateStopCloseText = [&]() {
-    if (*scanRunning) {
-        stopCloseBtn->setText("Stop");
-        stopCloseBtn->setToolTip("Stop current scan");
-    } else {
-        stopCloseBtn->setText("Close");
-        stopCloseBtn->setToolTip("Close the dialog");
-    }
-};
-updateStopCloseText();
+    // State
+    auto scanRunning = std::make_shared<bool>(false);
 
-// Example usage in your scan logic:
-QObject::connect(scanBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
-    *scanRunning = true;
+    // Helper to update Stop/Close button text
+    auto updateStopCloseText = [&]() {
+        if (*scanRunning) {
+            stopCloseBtn->setText("Stop");
+            stopCloseBtn->setToolTip("Stop current scan");
+        } else {
+            stopCloseBtn->setText("Close");
+            stopCloseBtn->setToolTip("Close the dialog");
+        }
+    };
     updateStopCloseText();
-    // ... start scan ...
-});
 
+    // --- Ctrl+W shortcut: only close if not scanning ---
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, [=]() {
+        if (!*scanRunning) dlg->accept();
+    });
 
+    // Example usage in your scan logic:
+    QObject::connect(scanBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
+        *scanRunning = true;
+        updateStopCloseText();
+        // ... start scan ...
+    });
 
     // Load port info once per scan
     static QMap<QPair<int, QString>, PortInfo> portInfoMap;
@@ -713,21 +745,21 @@ QObject::connect(scanBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mut
     });
 
     QObject::connect(stopCloseBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
-    if (*scanRunning) {
-        // Stop the scan, but do NOT close the dialog
-        *scanRunning = false;
-        scanBtn->setEnabled(true);
-        progressLabel->setText("0 % done");
-        etaLabel->setText("Estimated time remaining: --");
-        output->append("<b>Scan stopped.</b>");
-        currentPortEdit->clear();
-        updateStopCloseText();
-        QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after stop
-        return; // <--- This prevents the dialog from closing!
-    }
-    // Only close the dialog if not scanning
-    dlg->close();
-});
+        if (*scanRunning) {
+            // Stop the scan, but do NOT close the dialog
+            *scanRunning = false;
+            scanBtn->setEnabled(true);
+            progressLabel->setText("0 % done");
+            etaLabel->setText("Estimated time remaining: --");
+            output->append("<b>Scan stopped.</b>");
+            currentPortEdit->clear();
+            updateStopCloseText();
+            QObject::disconnect(timer, nullptr, nullptr, nullptr); // Disconnect after stop
+            return; // <--- This prevents the dialog from closing!
+        }
+        // Only close the dialog if not scanning
+        dlg->close();
+    });
 
     dlg->adjustSize();
     dlg->exec();
@@ -773,7 +805,6 @@ void showTracerouteDialog(QWidget *parent) {
     stopCloseBtn->setToolTip("Stop the traceroute or close the dialog.");
     QPushButton *bottomBtn = new QPushButton("Bottom");
     bottomBtn->setToolTip("Scroll to the bottom of the output.");
-    // bottomBtn->setEnabled(false);
     btnLayout->addWidget(traceBtn);
     btnLayout->addWidget(stopCloseBtn);
     btnLayout->addWidget(bottomBtn);
@@ -785,15 +816,22 @@ void showTracerouteDialog(QWidget *parent) {
     QPointer<QDialog> scanningDlg = nullptr;
 
     // Helper to update Stop/Close button text
-   auto updateStopCloseText = [&]() {
-    if (isTracing) {
-        stopCloseBtn->setText("Stop");
-        stopCloseBtn->setToolTip("Stop the traceroute");
-    } else {
-        stopCloseBtn->setText("Close");
-        stopCloseBtn->setToolTip("Close the dialog");
-    }
-};
+    auto updateStopCloseText = [&]() {
+        if (isTracing) {
+            stopCloseBtn->setText("Stop");
+            stopCloseBtn->setToolTip("Stop the traceroute");
+        } else {
+            stopCloseBtn->setText("Close");
+            stopCloseBtn->setToolTip("Close the dialog");
+        }
+    };
+
+    // --- Ctrl+W shortcut: only close if not tracing ---
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, [&]() {
+        if (!isTracing) dlg.accept();
+    });
 
     QObject::connect(traceBtn, &QPushButton::clicked, [&]() {
         QString host = input->text().trimmed();
@@ -982,6 +1020,7 @@ void showDhcpStatusDialog(QWidget *parent = nullptr) {
 
     QDialog dlg(parent);
     dlg.setWindowTitle("DHCP Status");
+    addCtrlWClose(&dlg);
   
     QVBoxLayout layout(&dlg);
 
@@ -1005,7 +1044,7 @@ void showDhcpStatusDialog(QWidget *parent = nullptr) {
     dlg.exec();
 }
 
-void showNslookupDialog(QWidget *parent = nullptr) {
+void showNslookupDialog(QWidget *parent) {
     // Custom input dialog with tooltip and custom button text
     QDialog inputDlg(parent);
     inputDlg.setWindowTitle("NS Lookup");
@@ -1022,8 +1061,8 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     QHBoxLayout btnBox;
     QPushButton okBtn("Look it up");
     okBtn.setToolTip("Start the DNS lookup for the entered hostname or IP.");
-    QPushButton cancelBtn("Cancel");
-    cancelBtn.setToolTip("Cancel and close this dialog.");
+    QPushButton cancelBtn("Close");
+    cancelBtn.setToolTip("Close this dialog.");
     btnBox.addWidget(&okBtn);
     btnBox.addWidget(&cancelBtn);
     vbox.addLayout(&btnBox);
@@ -1035,6 +1074,11 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     });
     QObject::connect(&okBtn, &QPushButton::clicked, &inputDlg, &QDialog::accept);
     QObject::connect(&cancelBtn, &QPushButton::clicked, &inputDlg, &QDialog::reject);
+
+    // --- Ctrl+W shortcut to close input dialog ---
+    QShortcut inputCloseShortcut(QKeySequence("Ctrl+W"), &inputDlg);
+    inputCloseShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(&inputCloseShortcut, &QShortcut::activated, &inputDlg, &QDialog::reject);
 
     if (inputDlg.exec() != QDialog::Accepted)
         return;
@@ -1186,6 +1230,11 @@ void showNslookupDialog(QWidget *parent = nullptr) {
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     layout.addWidget(closeBtn);
 
+    // --- Ctrl+W shortcut to close dialog ---
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
+
     dlg.adjustSize();
     dlg.exec();
 }
@@ -1193,6 +1242,7 @@ void showNslookupDialog(QWidget *parent = nullptr) {
 void showArpDialog(QWidget *parent = nullptr) {
     QDialog dlg(parent);
     dlg.setWindowTitle("ARP Table");
+    addCtrlWClose(&dlg);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
@@ -1330,6 +1380,7 @@ void showArpDialog(QWidget *parent = nullptr) {
 void showWifiScanDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("WiFi Networks");
+    addCtrlWClose(&dlg);
     dlg.setFixedWidth(650);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
@@ -1565,6 +1616,7 @@ void showWifiScanDialog(QWidget *parent) {
 void showNetUsageDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Network usage");
+    addCtrlWClose(&dlg);
     dlg.setFixedSize(420, 170);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
@@ -1871,6 +1923,7 @@ void showNetUsageDialog(QWidget *parent) {
 void showNetworkAdaptersDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Network Adapters");
+    addCtrlWClose(&dlg);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
@@ -2044,6 +2097,238 @@ void showNetworkAdaptersDialog(QWidget *parent) {
     dlg.exec();
 }
 
+void showSslCertificateDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("SSL Certificate Check");
+    dlg.setMinimumWidth(600);
+    dlg.setMaximumWidth(950);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *hostLabel = new QLabel("Host (e.g. www.google.com):");
+    QLineEdit *hostEdit = new QLineEdit;
+    hostEdit->setPlaceholderText("e.g. www.google.com");
+    QLabel *portLabel = new QLabel("Port:");
+    QLineEdit *portEdit = new QLineEdit("443");
+    portEdit->setValidator(new QIntValidator(1, 65535, portEdit));
+    layout->addWidget(hostLabel);
+    layout->addWidget(hostEdit);
+    layout->addWidget(portLabel);
+    layout->addWidget(portEdit);
+
+    QTextEdit *output = new QTextEdit;
+    output->setReadOnly(true);
+    output->setMinimumHeight(40);
+    output->setMaximumHeight(80);
+    output->setVisible(false);
+    layout->addWidget(output);
+
+    QScrollArea *scrollArea = new QScrollArea;
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setMinimumHeight(250);
+    scrollArea->setMaximumHeight(250);
+    scrollArea->setMinimumWidth(580);
+    scrollArea->setMaximumWidth(930);
+
+    QWidget *certsWidget = new QWidget;
+    certsWidget->setMinimumWidth(560);
+    certsWidget->setMaximumWidth(900);
+    QVBoxLayout *certsLayout = new QVBoxLayout(certsWidget);
+    certsLayout->setAlignment(Qt::AlignTop);
+    scrollArea->setWidget(certsWidget);
+    layout->addWidget(scrollArea);
+
+    QPushButton *checkBtn = new QPushButton("Check");
+    QPushButton *closeBtn = new QPushButton("Close");
+    QHBoxLayout *btnLayout = new QHBoxLayout;
+    btnLayout->addStretch();
+    btnLayout->addWidget(checkBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
+
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::reject);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    auto certInStore = [](const QByteArray &sha1, QString &storeOut) -> bool {
+        QStringList stores = { "Root", "CA" };
+        for (const QString &store : stores) {
+            QProcess proc;
+            proc.start("powershell", QStringList()
+                << "-Command"
+                << QString("Get-ChildItem -Path Cert:\\LocalMachine\\%1 | Where-Object { $_.Thumbprint -eq '%2' } | Select-Object -First 1 -ExpandProperty Thumbprint")
+                    .arg(store, QString::fromLatin1(sha1.toHex().toUpper())));
+            proc.waitForFinished(2000);
+            QString thumb = proc.readAllStandardOutput().trimmed();
+            if (!thumb.isEmpty()) {
+                storeOut = store;
+                return true;
+            }
+        }
+        storeOut.clear();
+        return false;
+    };
+
+    auto doCheck = [&]() {
+        QString host = hostEdit->text().trimmed();
+        int port = portEdit->text().toInt();
+        if (host.isEmpty() || port < 1 || port > 65535) {
+            output->setVisible(true);
+            output->setPlainText("Please enter a valid host and port.");
+            return;
+        }
+        output->clear();
+        output->setVisible(false);
+
+        // Remove previous cert widgets
+        QLayoutItem *item;
+        while ((item = certsLayout->takeAt(0)) != nullptr) {
+            if (item->widget()) item->widget()->deleteLater();
+            delete item;
+        }
+
+        // --- Show scanning dialog with minimum display time ---
+        QDialog workingDlg(&dlg);
+        workingDlg.setWindowTitle("Querying, please wait.");
+        workingDlg.setFixedSize(320, 180);
+        workingDlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
+        QVBoxLayout vbox(&workingDlg);
+        QLabel label("Querying, please wait.");
+        label.setAlignment(Qt::AlignCenter);
+        vbox.addWidget(&label);
+        QLabel animLabel;
+        animLabel.setFixedSize(96, 96);
+        animLabel.setScaledContents(true);
+        QMovie movie("StdWorking.gif");
+        animLabel.setMovie(&movie);
+        vbox.addWidget(&animLabel, 0, Qt::AlignHCenter);
+        movie.start();
+        workingDlg.setModal(true);
+        workingDlg.show();
+        QCoreApplication::processEvents();
+        QElapsedTimer timer;
+        timer.start();
+
+        // --- Network operation ---
+        QSslSocket socket;
+        socket.connectToHostEncrypted(host, port);
+        bool ok = socket.waitForEncrypted(5000);
+
+        int elapsed = int(timer.elapsed());
+        if (elapsed < 300)
+            QThread::msleep(300 - elapsed);
+
+        workingDlg.accept();
+
+        if (!ok) {
+            output->setVisible(true);
+            output->setPlainText("Could not connect or handshake failed:\n" + socket.errorString());
+            return;
+        }
+        QList<QSslCertificate> certs = socket.peerCertificateChain();
+        if (certs.isEmpty()) {
+            output->setVisible(true);
+            output->setPlainText("No certificate received.");
+            return;
+        }
+
+        struct CertInfo {
+            QSslCertificate cert;
+            QByteArray sha1;
+            QString store;
+            bool inStore;
+        };
+        QList<CertInfo> certList;
+        for (const QSslCertificate &cert : certs) {
+            QByteArray sha1 = cert.digest(QCryptographicHash::Sha1);
+            QString store;
+            bool inStore = certInStore(sha1, store);
+            certList.append(CertInfo{cert, sha1, store, inStore});
+        }
+        std::sort(certList.begin(), certList.end(), [](const CertInfo &a, const CertInfo &b) {
+            return a.inStore > b.inStore;
+        });
+
+        int idx = 1;
+        for (const CertInfo &ci : certList) {
+            QWidget *certWidget = new QWidget;
+            certWidget->setMinimumWidth(560);
+            certWidget->setMaximumWidth(900);
+            QVBoxLayout *certLayout = new QVBoxLayout(certWidget);
+            certLayout->setContentsMargins(8, 8, 8, 8);
+
+            // Use plain text for cert info
+            QString info;
+            info += QString("Certificate #%1\n").arg(idx++);
+            info += QString("Subject:    %1\n").arg(ci.cert.subjectInfo(QSslCertificate::CommonName).join(", "));
+            info += QString("Issuer:     %1\n").arg(ci.cert.issuerInfo(QSslCertificate::CommonName).join(", "));
+            info += QString("Valid from: %1\n").arg(ci.cert.effectiveDate().toString());
+            info += QString("Valid to:   %1\n").arg(ci.cert.expiryDate().toString());
+            info += QString("Serial:     %1\n").arg(ci.cert.serialNumber());
+            info += QString("SHA1:       %1\n").arg(QString::fromLatin1(ci.sha1.toHex()));
+            if (ci.inStore)
+                info += QString("Store:      [Found in Windows certificate store: %1]\n").arg(ci.store);
+            else
+                info += "Store:      [Not found in Windows certificate store]\n";
+
+            QPlainTextEdit *infoEdit = new QPlainTextEdit(info);
+            infoEdit->setReadOnly(true);
+            infoEdit->setFrameStyle(QFrame::NoFrame);
+            infoEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            infoEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            infoEdit->setMinimumWidth(540);
+            infoEdit->setMaximumWidth(880);
+            infoEdit->setFixedHeight(infoEdit->fontMetrics().height() * (info.count('\n') + 2));
+            infoEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            certLayout->addWidget(infoEdit);
+
+            if (ci.inStore) {
+                QPushButton *removeBtn = new QPushButton("Remove");
+                removeBtn->setProperty("sha1", QString::fromLatin1(ci.sha1.toHex().toUpper()));
+                removeBtn->setProperty("store", ci.store);
+                removeBtn->setProperty("host", host);
+                QObject::connect(removeBtn, &QPushButton::clicked, [=, &dlg, &checkBtn]() {
+                    QString sha1 = removeBtn->property("sha1").toString();
+                    QString store = removeBtn->property("store").toString();
+                    QString hostVal = removeBtn->property("host").toString();
+                    QMessageBox msgBox(&dlg);
+                    msgBox.setWindowTitle("Remove Certificate");
+                    msgBox.setText(QString("Are you sure you want to remove the cert for [%1]?").arg(hostVal));
+                    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+                    msgBox.setDefaultButton(QMessageBox::Cancel);
+                    int ret = msgBox.exec();
+                    if (ret == QMessageBox::Yes) {
+                        QString psCmd = QString(
+                            "Remove-Item -Path Cert:\\LocalMachine\\%1\\%2 -Force"
+                        ).arg(store, sha1);
+                        int result = QProcess::execute("powershell", QStringList() << "-Command" << psCmd);
+                        if (result == 0) {
+                            QMessageBox::information(&dlg, "Certificate Removed", "Certificate removed from store.");
+                            checkBtn->click(); // Refresh
+                        } else {
+                            QMessageBox::warning(&dlg, "Failed", "Failed to remove certificate.");
+                        }
+                    }
+                });
+                certLayout->addWidget(removeBtn, 0, Qt::AlignLeft);
+
+                QLabel *spacer = new QLabel;
+                spacer->setFixedHeight(8);
+                certLayout->addWidget(spacer);
+            }
+
+            certsLayout->addWidget(certWidget);
+        }
+        certsLayout->addStretch();
+    };
+
+    QObject::connect(checkBtn, &QPushButton::clicked, doCheck);
+    QObject::connect(hostEdit, &QLineEdit::returnPressed, doCheck);
+    QObject::connect(portEdit, &QLineEdit::returnPressed, doCheck);
+
+    dlg.exec();
+}
 
 // Main function
 int main(int argc, char *argv[]) {
@@ -2246,6 +2531,7 @@ QAction *netUsageAction = netToolsMenu->addAction("Network Usage...");
 QAction *arpAction = netToolsMenu->addAction("Arp...");
 QAction *wifiScanAction = netToolsMenu->addAction("WiFi Scan...");
 QAction *adaptersAction = netToolsMenu->addAction("Network Adapters");
+QAction *sslCertAction = netToolsMenu->addAction("HTTPS Certificate Check...");
 
 
 QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top"); // Dot first, no checkmark
@@ -2260,6 +2546,10 @@ auto updateAlwaysOnTopText = [&]() {
     }
 };
 updateAlwaysOnTopText();
+
+QObject::connect(sslCertAction, &QAction::triggered, [&window]() {
+    showSslCertificateDialog(&window);
+});
 
 
 QObject::connect(adaptersAction, &QAction::triggered, [&]() {
@@ -2305,6 +2595,11 @@ QObject::connect(netscanAction, &QAction::triggered, [&]() {
 
 QObject::connect(pingAction, &QAction::triggered, [&]() {
     QDialog dlg(&window);
+
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
+
     dlg.setWindowTitle("Ping Host");
     // Remove the Close (X) button from the window frame
     dlg.setWindowFlags((dlg.windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::Dialog | Qt::WindowTitleHint);
@@ -2674,21 +2969,13 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
     };
 
     QFileInfo fi(localPath);
-    bool needDownload = !fi.exists();
 
-    // Check remote timestamp if file exists
-    if (!needDownload) {
-        QDateTime remote = getRemoteTimestamp(url);
-        if (remote.isValid() && fi.lastModified().toUTC() < remote) {
-            needDownload = true;
-        }
-    }
+    // Always try to download the latest manual before opening
+    bool downloaded = downloadManual(url, localPath);
 
-    if (needDownload) {
-        if (!downloadManual(url, localPath)) {
-            QMessageBox::warning(&window, "Manual", "Could not download the latest manual.");
-            return;
-        }
+    if (!downloaded && !fi.exists()) {
+        QMessageBox::warning(&window, "Manual", "Could not download the manual and no local copy exists.");
+        return;
     }
 
     // Open the PDF with the default viewer
@@ -2728,6 +3015,11 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
 
     window.resize(255, 330);
     window.show();
+
+ QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &window);
+closeShortcut->setContext(Qt::ApplicationShortcut);
+QObject::connect(closeShortcut, &QShortcut::activated, &window, &QWidget::close);
+    
 
     return app.exec();
 }
