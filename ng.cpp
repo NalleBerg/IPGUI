@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.1.1
+// Project version: 3.2.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -79,6 +79,7 @@
 #include <QCryptographicHash>
 #include <QVariant>
 #include <QPlainTextEdit>
+#include <QComboBox>
 
 // Windows API for network functions Share-scanner
 #pragma comment(lib, "Netapi32.lib")
@@ -100,7 +101,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.1.1";
+const QString VersionNumber = "3.2.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -2330,6 +2331,284 @@ void showSslCertificateDialog(QWidget *parent) {
     dlg.exec();
 }
 
+void showMtuDiscoveryDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("MTU Discovery");
+    addCtrlWClose(&dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *prompt = new QLabel("Find the optimal MTU for your connection (largest packet size without fragmentation):");
+    layout->addWidget(prompt);
+
+    // Host input
+    QHBoxLayout *hostLayout = new QHBoxLayout();
+    QLabel *hostLabel = new QLabel("Host:");
+    QLineEdit *hostEdit = new QLineEdit("8.8.8.8");
+    hostEdit->setToolTip("Enter the host to ping (default: 8.8.8.8)");
+    hostLayout->addWidget(hostLabel);
+    hostLayout->addWidget(hostEdit);
+    layout->addLayout(hostLayout);
+
+    // Range and step input
+    QHBoxLayout *rangeLayout = new QHBoxLayout();
+    QLabel *minLabel = new QLabel("Min size:");
+    QSpinBox *minSpin = new QSpinBox;
+    minSpin->setRange(12, 2000);
+    minSpin->setValue(1200);
+    QLabel *maxLabel = new QLabel("Max size:");
+    QSpinBox *maxSpin = new QSpinBox;
+    maxSpin->setRange(12, 2000);
+    maxSpin->setValue(1500);
+    QLabel *stepLabel = new QLabel("Step:");
+    QSpinBox *stepSpin = new QSpinBox;
+    stepSpin->setRange(1, 200);
+    stepSpin->setValue(10);
+    rangeLayout->addWidget(minLabel);
+    rangeLayout->addWidget(minSpin);
+    rangeLayout->addSpacing(10);
+    rangeLayout->addWidget(maxLabel);
+    rangeLayout->addWidget(maxSpin);
+    rangeLayout->addSpacing(10);
+    rangeLayout->addWidget(stepLabel);
+    rangeLayout->addWidget(stepSpin);
+    layout->addLayout(rangeLayout);
+
+    // Output
+    QTextEdit *output = new QTextEdit;
+    output->setReadOnly(true);
+    output->setMinimumHeight(120);
+    layout->addWidget(output);
+
+    // --- Interface and MTU setting controls ---
+    QHBoxLayout *mtuLayout = new QHBoxLayout();
+    QLabel *ifaceLabel = new QLabel("Interface:");
+    QComboBox *ifaceCombo = new QComboBox;
+    QLabel *mtuLabel = new QLabel("Set MTU:");
+    QSpinBox *mtuSpin = new QSpinBox;
+    mtuSpin->setRange(576, 2000);
+    mtuSpin->setValue(1500);
+    QPushButton *setMtuBtn = new QPushButton("Set MTU");
+    mtuLayout->addWidget(ifaceLabel);
+    mtuLayout->addWidget(ifaceCombo);
+    mtuLayout->addSpacing(10);
+    mtuLayout->addWidget(mtuLabel);
+    mtuLayout->addWidget(mtuSpin);
+    mtuLayout->addWidget(setMtuBtn);
+    layout->addLayout(mtuLayout);
+
+    // Buttons
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *startBtn = new QPushButton("Start Scan");
+    QPushButton *stopBtn = new QPushButton("Stop");
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnLayout->addWidget(startBtn);
+    btnLayout->addWidget(stopBtn);
+    btnLayout->addWidget(closeBtn);
+    layout->addLayout(btnLayout);
+
+    stopBtn->setEnabled(false);
+    setMtuBtn->setEnabled(false);
+
+    // State
+    auto running = std::make_shared<bool>(false);
+    auto timer = std::make_shared<QTimer>();
+    timer->setSingleShot(true);
+    auto currentSize = std::make_shared<int>(0);
+    auto best = std::make_shared<int>(-1);
+    auto step = std::make_shared<int>(1);
+    auto tryNextPtr = std::make_shared<std::function<void()>>();
+    auto procPtr = std::make_shared<QPointer<QProcess>>();
+
+    // Populate interface combo
+    auto updateInterfaces = [&]() {
+        ifaceCombo->clear();
+        QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
+        for (const QNetworkInterface &iface : interfaces) {
+            if (!(iface.flags() & QNetworkInterface::IsUp) ||
+                !(iface.flags() & QNetworkInterface::IsRunning) ||
+                (iface.flags() & QNetworkInterface::IsLoopBack))
+                continue;
+            for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol && !entry.ip().isLoopback()) {
+                    ifaceCombo->addItem(iface.humanReadableName());
+                    break;
+                }
+            }
+        }
+    };
+    updateInterfaces();
+
+    // Helper to update UI
+    auto setUiEnabled = [&](bool enabled) {
+        hostEdit->setEnabled(enabled);
+        minSpin->setEnabled(enabled);
+        maxSpin->setEnabled(enabled);
+        stepSpin->setEnabled(enabled);
+        startBtn->setEnabled(enabled);
+        stopBtn->setEnabled(!enabled);
+        ifaceCombo->setEnabled(enabled);
+        mtuSpin->setEnabled(enabled && *best > 0);
+        setMtuBtn->setEnabled(enabled && *best > 0);
+    };
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(stopBtn, &QPushButton::clicked, [&]() {
+        *running = false;
+        setUiEnabled(true);
+        if (*procPtr) {
+            (*procPtr)->kill();
+            (*procPtr)->deleteLater();
+            *procPtr = nullptr;
+        }
+        timer->stop();
+    });
+
+    QObject::connect(startBtn, &QPushButton::clicked, [&]() mutable {
+        QObject::disconnect(timer.get(), &QTimer::timeout, nullptr, nullptr);
+
+        QString host = hostEdit->text().trimmed();
+        int minSize = minSpin->value();
+        int maxSize = maxSpin->value();
+        *step = stepSpin->value();
+        if (host.isEmpty() || minSize > maxSize || *step <= 0) {
+            QMessageBox::warning(&dlg, "Input Error", "Please enter a valid host, size range, and step.");
+            return;
+        }
+        output->clear();
+        setUiEnabled(false);
+        *running = true;
+
+        *currentSize = minSize;
+        *best = -1;
+
+        *tryNextPtr = [=]() mutable {
+            if (!*running || *currentSize > maxSize) {
+                setUiEnabled(true);
+                if (*best > 0) {
+                    output->append(QString("<b>Largest successful packet size (MTU): <span style='color:green;'>%1 bytes</span></b>").arg(*best));
+                    mtuSpin->setValue(*best);
+                } else {
+                    output->append("<b style='color:red;'>No successful pings in range.</b>");
+                }
+                if (*procPtr) {
+                    (*procPtr)->kill();
+                    (*procPtr)->deleteLater();
+                    *procPtr = nullptr;
+                }
+                return;
+            }
+
+            int size = *currentSize;
+            QString pingMsg = QString("Pinging %1 with %2 bytes... ").arg(host).arg(size);
+
+            QProcess *proc = new QProcess();
+            *procPtr = proc;
+            QTimer *killTimer = new QTimer(proc);
+            killTimer->setSingleShot(true);
+
+            QObject::connect(killTimer, &QTimer::timeout, proc, [=]() {
+                if (proc->state() == QProcess::Running)
+                    proc->kill();
+                killTimer->deleteLater();
+                if (*procPtr == proc) {
+                    proc->deleteLater();
+                    *procPtr = nullptr;
+                }
+            });
+
+            QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                [=](int, QProcess::ExitStatus) mutable {
+                if (killTimer->isActive()) {
+                    killTimer->stop();
+                    killTimer->deleteLater();
+                }
+                QString result = proc->readAllStandardOutput();
+                bool success = result.contains("TTL=") && !result.contains("Packet needs to be fragmented");
+                QString statusMsg;
+                if (success) {
+                    statusMsg = QString("<span style='color:green;'>Success (%1 bytes)</span>").arg(size);
+                    if (size > *best) *best = size;
+                } else {
+                    statusMsg = QString("<span style='color:red;'>Failed (%1 bytes, fragmentation or timeout)</span>").arg(size);
+                }
+                output->append(pingMsg + statusMsg);
+
+                proc->deleteLater();
+                if (*procPtr == proc)
+                    *procPtr = nullptr;
+                *currentSize += *step;
+                timer->start(200);
+            });
+            proc->start("ping", QStringList() << host << "-n" << "1" << "-l" << QString::number(size) << "-f");
+            killTimer->start(2000);
+        };
+
+        QObject::connect(timer.get(), &QTimer::timeout, [=]() { (*tryNextPtr)(); });
+
+        (*tryNextPtr)();
+    });
+
+    // --- Set MTU Button ---
+    QObject::connect(setMtuBtn, &QPushButton::clicked, [&]() {
+        if (*best <= 0) {
+            QMessageBox::warning(&dlg, "Set MTU", "No MTU value to set. Run the test first.");
+            return;
+        }
+        if (ifaceCombo->currentText().isEmpty()) {
+            QMessageBox::warning(&dlg, "Set MTU", "No network interface selected.");
+            return;
+        }
+        int mtu = *best;
+        int userMtu = mtuSpin->value();
+        if (userMtu > mtu) {
+            int cont = QMessageBox::warning(
+                &dlg, "MTU Warning",
+                QString("You entered an MTU (%1) above the discovered maximum (%2).<br>"
+                        "This may cause fragmentation or connectivity issues.<br><br>"
+                        "Are you sure you want to continue?")
+                    .arg(userMtu).arg(mtu),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel
+            );
+            if (cont != QMessageBox::Yes)
+                return;
+        }
+
+        // Confirm
+        int ret = QMessageBox::question(&dlg, "Set MTU",
+            QString("Set MTU for interface <b>%1</b> to <b>%2</b>?<br><br>"
+                    "This requires administrator rights.").arg(ifaceCombo->currentText()).arg(userMtu),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (ret != QMessageBox::Yes)
+            return;
+
+        // Try to set MTU using netsh (with UAC)
+        QString psCmd = QString(
+            "Start-Process netsh -ArgumentList 'interface ipv4 set subinterface \"%1\" mtu=%2 store=persistent' -Verb runAs -WindowStyle Hidden"
+        ).arg(ifaceCombo->currentText()).arg(userMtu);
+
+        int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+
+        if (result == 0) {
+            QMessageBox::information(&dlg, "Set MTU", QString("MTU set to %1 for interface %2.<br><br>You may need to reconnect or restart your network adapter for the change to take effect.").arg(userMtu).arg(ifaceCombo->currentText()));
+        } else {
+            // If failed, offer to open network settings
+            int openSettings = QMessageBox::question(&dlg, "Set MTU",
+                "Failed to set MTU automatically.<br><br>"
+                "Would you like to open the Windows network settings to set it manually?",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (openSettings == QMessageBox::Yes) {
+                QProcess::startDetached("ms-settings:network");
+            }
+        }
+    });
+
+    // Remove: QObject::connect(&dlg, &QDialog::shown, ...) -- not needed and not available in Qt
+
+    dlg.adjustSize();
+    dlg.exec();
+}
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -2521,17 +2800,18 @@ QMenu *netToolsMenu = fileMenu->addMenu("NetTools");
 
 
 // Add action to NetTools submenu
-QAction *pingAction = netToolsMenu->addAction("Ping...");
-QAction *netscanAction = netToolsMenu->addAction("IP Scanner...");
-QAction *nslookupAction = netToolsMenu->addAction("NS Lookup...");
-QAction *tracertAction = netToolsMenu->addAction("Traceroute...");
-QAction *portscanAction = netToolsMenu->addAction("Port Scan...");
-QAction *dhcpStatusAction = netToolsMenu->addAction("DHCP Status...");
-QAction *netUsageAction = netToolsMenu->addAction("Network Usage...");
-QAction *arpAction = netToolsMenu->addAction("Arp...");
-QAction *wifiScanAction = netToolsMenu->addAction("WiFi Scan...");
-QAction *adaptersAction = netToolsMenu->addAction("Network Adapters");
-QAction *sslCertAction = netToolsMenu->addAction("HTTPS Certificate Check...");
+QAction *arpAction           = netToolsMenu->addAction("Arp...");
+QAction *dhcpStatusAction    = netToolsMenu->addAction("DHCP Status...");
+QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check...");
+QAction *netscanAction       = netToolsMenu->addAction("IP Scanner...");
+QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery...");
+QAction *adaptersAction      = netToolsMenu->addAction("Network Adapters");
+QAction *netUsageAction      = netToolsMenu->addAction("Network Usage...");
+QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup...");
+QAction *pingAction          = netToolsMenu->addAction("Ping...");
+QAction *portscanAction      = netToolsMenu->addAction("Port Scan...");
+QAction *tracertAction       = netToolsMenu->addAction("Traceroute...");
+QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan...");
 
 
 QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top"); // Dot first, no checkmark
@@ -2546,6 +2826,12 @@ auto updateAlwaysOnTopText = [&]() {
     }
 };
 updateAlwaysOnTopText();
+
+
+QObject::connect(mtuDiscoveryAction, &QAction::triggered, [&]() {
+    showMtuDiscoveryDialog(&window);
+});
+
 
 QObject::connect(sslCertAction, &QAction::triggered, [&window]() {
     showSslCertificateDialog(&window);
@@ -3016,9 +3302,19 @@ QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
     window.resize(255, 330);
     window.show();
 
- QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &window);
+QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &window);
 closeShortcut->setContext(Qt::ApplicationShortcut);
-QObject::connect(closeShortcut, &QShortcut::activated, &window, &QWidget::close);
+QObject::connect(closeShortcut, &QShortcut::activated, [&window]() {
+    auto ret = QMessageBox::question(
+        &window,
+        "Exit IPGui",
+        "Are you sure you want to quit?",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::Yes // <-- Default is now Yes
+    );
+    if (ret == QMessageBox::Yes)
+        window.close();
+});
     
 
     return app.exec();
