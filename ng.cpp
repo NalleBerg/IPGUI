@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.4.0
+// Project version: 3.5.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -81,6 +81,7 @@
 #include <QPlainTextEdit>
 #include <QComboBox>
 #include <QFileDialog>
+#include <QGroupBox>
 
 
 
@@ -104,7 +105,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.4.0";
+const QString VersionNumber = "3.5.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -3078,6 +3079,338 @@ void showNetstatStatisticsDialog(QWidget *parent) {
     dlg.exec();
 }
 
+
+void showRouteTableDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Route Table Viewer/Editor");
+    dlg.setMinimumWidth(900);
+    addCtrlWClose(&dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *title = new QLabel(
+        "<b>Windows Route Table</b><br>"
+        "<span style='color:gray;'>Shows all active IPv4 and IPv6 routes.<br>"
+        "You can delete or add routes.<br>"
+        "Mouseover any value for technical details.</span>");
+    title->setTextFormat(Qt::RichText);
+    layout->addWidget(title);
+
+    // IPv4 columns
+    QStringList ipv4Headers = {
+        "Destination", "Netmask", "Gateway", "Interface", "Metric", "Action"
+    };
+    QStringList ipv4Tips = {
+        "Destination IP/network for this route.\n(Technical: Network address in CIDR notation.)",
+        "Subnet mask for the destination.\n(Technical: Specifies the network portion of the address.)",
+        "Gateway IP for forwarding packets.\n(Technical: Next hop for this route.)",
+        "Local interface used for this route.\n(Technical: Adapter IP address.)",
+        "Route metric (priority).\n(Technical: Lower is preferred.)",
+        "Delete this route."
+    };
+
+    // IPv6 columns
+    QStringList ipv6Headers = {
+        "If", "Metric", "Destination", "Gateway", "Action"
+    };
+    QStringList ipv6Tips = {
+        "Interface index.\n(Technical: Windows adapter index for this route.)",
+        "Route metric (priority).\n(Technical: Lower is preferred.)",
+        "Destination IPv6 network/prefix.\n(Technical: Network address in CIDR notation.)",
+        "Gateway IPv6 address or On-link.\n(Technical: Next hop for this route.)",
+        "Delete this route."
+    };
+
+    auto createTable = [&](const QStringList &headers, const QStringList &tips) -> QTableWidget* {
+        QTableWidget *table = new QTableWidget();
+        table->setColumnCount(headers.size());
+        table->setHorizontalHeaderLabels(headers);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        table->verticalHeader()->setVisible(false);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setFocusPolicy(Qt::NoFocus);
+        for (int i = 0; i < headers.size(); ++i)
+            table->horizontalHeaderItem(i)->setToolTip(tips[i]);
+        return table;
+    };
+
+    QTableWidget *ipv4Table = createTable(ipv4Headers, ipv4Tips);
+    QTableWidget *ipv6Table = createTable(ipv6Headers, ipv6Tips);
+
+    QBrush blue(QColor("#1c2684"));
+    QBrush green(QColor("#1a7d2c"));
+    QBrush red(QColor("#c80000"));
+    QBrush gray(QColor("#888"));
+
+    // Use std::function for recursion/capture
+    std::function<void(QTableWidget*)> fillIPv4Table;
+    fillIPv4Table = [&](QTableWidget *table) {
+        table->setRowCount(0);
+        QProcess proc;
+        proc.start("route", QStringList() << "print");
+        proc.waitForFinished(2000);
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        bool inTable = false;
+        for (const QString &line : lines) {
+            QString trimmed = line.trimmed();
+            if (trimmed.startsWith("IPv4 Route Table")) {
+                inTable = false;
+                continue;
+            }
+            if (trimmed.startsWith("Network Destination")) {
+                inTable = true;
+                continue;
+            }
+            if (inTable && (trimmed.isEmpty() || trimmed.startsWith("===") || trimmed.startsWith("Persistent Routes"))) {
+                inTable = false;
+                continue;
+            }
+            if (inTable) {
+                QStringList parts = trimmed.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                if (parts.size() < 5) continue;
+                int row = table->rowCount();
+                table->insertRow(row);
+                for (int col = 0; col < 5; ++col) {
+                    QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
+                    item->setForeground(col == 0 ? blue : (col == 2 ? green : gray));
+                    item->setToolTip(ipv4Tips[col]);
+                    item->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    table->setItem(row, col, item);
+                }
+                // Add Delete button
+                QPushButton *delBtn = new QPushButton("Delete");
+                delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> mask <netmask> <gateway>)");
+                table->setCellWidget(row, 5, delBtn);
+                QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
+                    QString dest = parts[0], mask = parts[1], gw = parts[2];
+                    int ret = QMessageBox::question(&dlg, "Delete Route",
+                        QString("Are you sure you want to delete this route?\n\n"
+                                "Destination: %1\nNetmask: %2\nGateway: %3").arg(dest, mask, gw),
+                        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                    if (ret != QMessageBox::Yes) return;
+                    // Delete route (needs admin)
+                    QString psCmd = QString(
+                        "Start-Process route -ArgumentList 'delete %1 mask %2 %3' -Verb runAs -WindowStyle Hidden"
+                    ).arg(dest, mask, gw);
+                    int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+                    if (result == 0) {
+                        QMessageBox::information(&dlg, "Route Deleted", "Route deleted successfully.");
+                        fillIPv4Table(table);
+                    } else {
+                        QMessageBox::warning(&dlg, "Route Delete", "Failed to delete route (admin rights needed or cancelled).");
+                        // Do NOT refresh table if failed
+                    }
+                });
+            }
+        }
+        table->resizeColumnsToContents();
+    };
+
+    std::function<void(QTableWidget*)> fillIPv6Table;
+    fillIPv6Table = [&](QTableWidget *table) {
+        table->setRowCount(0);
+        QProcess proc;
+        proc.start("route", QStringList() << "print");
+        proc.waitForFinished(2000);
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        bool inTable = false;
+        int colCount = 4;
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
+            if (line.startsWith("IPv6 Route Table")) {
+                inTable = false;
+                continue;
+            }
+            if (line.startsWith("Active Routes:")) {
+                inTable = true;
+                continue;
+            }
+            if (inTable && (line.isEmpty() || line.startsWith("===") || line.startsWith("Persistent Routes"))) {
+                inTable = false;
+                continue;
+            }
+            if (inTable) {
+                QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                if (parts.size() == colCount) {
+                    int row = table->rowCount();
+                    table->insertRow(row);
+                    for (int col = 0; col < colCount; ++col) {
+                        QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
+                        item->setForeground(col == 2 ? blue : (col == 3 ? green : gray));
+                        item->setToolTip(ipv6Tips[col]);
+                        item->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        table->setItem(row, col, item);
+                    }
+                    // Add Delete button
+                    QPushButton *delBtn = new QPushButton("Delete");
+                    delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> -6)");
+                    table->setCellWidget(row, 4, delBtn);
+                    QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
+                        QString dest = parts[2];
+                        int ret = QMessageBox::question(&dlg, "Delete Route",
+                            QString("Are you sure you want to delete this IPv6 route?\n\n"
+                                    "Destination: %1").arg(dest),
+                            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                        if (ret != QMessageBox::Yes) return;
+                        QString psCmd = QString(
+                            "Start-Process route -ArgumentList 'delete %1 -6' -Verb runAs -WindowStyle Hidden"
+                        ).arg(dest);
+                        int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+                        if (result == 0) {
+                            QMessageBox::information(&dlg, "Route Deleted", "IPv6 route deleted successfully.");
+                            fillIPv6Table(table);
+                        } else {
+                            QMessageBox::warning(&dlg, "Route Delete", "Failed to delete IPv6 route (admin rights needed or cancelled).");
+                            // Do NOT refresh table if failed
+                        }
+                    });
+                } else if (parts.size() == 3 && i + 1 < lines.size()) {
+                    QString nextLine = lines[i + 1].trimmed();
+                    QStringList nextParts = nextLine.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                    if (nextParts.size() == 1) {
+                        int row = table->rowCount();
+                        table->insertRow(row);
+                        for (int col = 0; col < 3; ++col) {
+                            QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
+                            item->setForeground(col == 2 ? blue : gray);
+                            item->setToolTip(ipv6Tips[col]);
+                            item->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                            table->setItem(row, col, item);
+                        }
+                        QTableWidgetItem *gwItem = new QTableWidgetItem(nextParts[0]);
+                        gwItem->setForeground(green);
+                        gwItem->setToolTip(ipv6Tips[3]);
+                        gwItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        table->setItem(row, 3, gwItem);
+                        // Add Delete button
+                        QPushButton *delBtn = new QPushButton("Delete");
+                        delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> -6)");
+                        table->setCellWidget(row, 4, delBtn);
+                        QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
+                            QString dest = parts[2];
+                            int ret = QMessageBox::question(&dlg, "Delete Route",
+                                QString("Are you sure you want to delete this IPv6 route?\n\n"
+                                        "Destination: %1").arg(dest),
+                                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                            if (ret != QMessageBox::Yes) return;
+                            QString psCmd = QString(
+                                "Start-Process route -ArgumentList 'delete %1 -6' -Verb runAs -WindowStyle Hidden"
+                            ).arg(dest);
+                            int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+                            if (result == 0) {
+                                QMessageBox::information(&dlg, "Route Deleted", "IPv6 route deleted successfully.");
+                                fillIPv6Table(table);
+                            } else {
+                                QMessageBox::warning(&dlg, "Route Delete", "Failed to delete IPv6 route (admin rights needed or cancelled).");
+                                // Do NOT refresh table if failed
+                            }
+                        });
+                        ++i;
+                    }
+                }
+            }
+        }
+        table->resizeColumnsToContents();
+    };
+
+    fillIPv4Table(ipv4Table);
+    fillIPv6Table(ipv6Table);
+
+    QLabel *ipv4Label = new QLabel("<b>IPv4 Routes</b>");
+    ipv4Label->setTextFormat(Qt::RichText);
+    layout->addWidget(ipv4Label);
+    layout->addWidget(ipv4Table);
+
+    QLabel *ipv6Label = new QLabel("<b>IPv6 Routes</b>");
+    ipv6Label->setTextFormat(Qt::RichText);
+    layout->addWidget(ipv6Label);
+    layout->addWidget(ipv6Table);
+
+    // Add route section (IPv4 and IPv6)
+    QGroupBox *addBox = new QGroupBox("Add Route");
+    QFormLayout *form = new QFormLayout(addBox);
+    QComboBox *protoCombo = new QComboBox;
+    protoCombo->addItems({"IPv4", "IPv6"});
+    protoCombo->setToolTip("Select route type.\n(Technical: IPv4 or IPv6 routing table.)");
+    QLineEdit *destEdit = new QLineEdit;
+    destEdit->setPlaceholderText("e.g. 192.168.2.0 or 2001:db8::");
+    destEdit->setToolTip("Destination IP/network.\n(Technical: Network address in CIDR notation.)");
+    QLineEdit *maskEdit = new QLineEdit;
+    maskEdit->setPlaceholderText("e.g. 255.255.255.0 (IPv4 only)");
+    maskEdit->setToolTip("Subnet mask for the destination.\n(Technical: Specifies the network portion of the address.)");
+    QLineEdit *gwEdit = new QLineEdit;
+    gwEdit->setPlaceholderText("e.g. 192.168.1.1 or fe80::1");
+    gwEdit->setToolTip("Gateway IP for forwarding packets.\n(Technical: Next hop for this route.)");
+    QLineEdit *ifaceEdit = new QLineEdit;
+    ifaceEdit->setPlaceholderText("e.g. 192.168.1.100 or interface index");
+    ifaceEdit->setToolTip("Local interface IP address or index.\n(Technical: Adapter used for this route.)");
+    QSpinBox *metricSpin = new QSpinBox;
+    metricSpin->setRange(1, 9999);
+    metricSpin->setValue(10);
+    metricSpin->setToolTip("Route metric (priority).\n(Technical: Lower is preferred.)");
+    QPushButton *addBtn = new QPushButton("Add Route");
+    addBtn->setToolTip("Add this route to the table.\n(Technical: route add <destination> mask <netmask> <gateway> metric <metric> if <interface>.)");
+
+    form->addRow("Type:", protoCombo);
+    form->addRow("Destination:", destEdit);
+    form->addRow("Netmask:", maskEdit);
+    form->addRow("Gateway:", gwEdit);
+    form->addRow("Interface:", ifaceEdit);
+    form->addRow("Metric:", metricSpin);
+    form->addRow(addBtn);
+
+    layout->addWidget(addBox);
+
+    QObject::connect(addBtn, &QPushButton::clicked, [&]() {
+        QString proto = protoCombo->currentText();
+        QString dest = destEdit->text().trimmed();
+        QString mask = maskEdit->text().trimmed();
+        QString gw = gwEdit->text().trimmed();
+        QString iface = ifaceEdit->text().trimmed();
+        int metric = metricSpin->value();
+        if (dest.isEmpty() || gw.isEmpty() || iface.isEmpty() || (proto == "IPv4" && mask.isEmpty())) {
+            QMessageBox::warning(&dlg, "Input Error", "Please fill in all required fields.");
+            return;
+        }
+        int ret = QMessageBox::question(&dlg, "Add Route",
+            QString("Are you sure you want to add this route?\n\n"
+                    "Type: %1\nDestination: %2\nNetmask: %3\nGateway: %4\nInterface: %5\nMetric: %6")
+                .arg(proto, dest, mask, gw, iface).arg(metric),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (ret != QMessageBox::Yes) return;
+        // Add route (needs admin)
+        QString psCmd;
+        if (proto == "IPv4") {
+            psCmd = QString(
+                "Start-Process route -ArgumentList 'add %1 mask %2 %3 metric %4 if %5' -Verb runAs -WindowStyle Hidden"
+            ).arg(dest, mask, gw).arg(metric).arg(iface);
+        } else {
+            psCmd = QString(
+                "Start-Process route -ArgumentList 'add %1 %2 metric %3 if %4 -6' -Verb runAs -WindowStyle Hidden"
+            ).arg(dest, gw).arg(metric).arg(iface);
+        }
+        int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+        if (result == 0)
+            QMessageBox::information(&dlg, "Route Added", "Route added successfully.");
+        else
+            QMessageBox::warning(&dlg, "Route Add", "Failed to add route (admin rights needed).");
+        fillIPv4Table(ipv4Table);
+        fillIPv6Table(ipv6Table);
+    });
+
+    QPushButton *closeBtn = new QPushButton("Close");
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    layout->addWidget(closeBtn);
+
+    dlg.adjustSize();
+    dlg.exec();
+}
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -3275,12 +3608,13 @@ QAction *hostsFileAction     = netToolsMenu->addAction("Hosts File Editor");
 QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check");
 QAction *netscanAction       = netToolsMenu->addAction("IP Scanner");
 QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery");
-QAction *netstatStatsAction = netToolsMenu->addAction("Netstat Statistics");
+QAction *netstatStatsAction  = netToolsMenu->addAction("Netstat Statistics");
 QAction *adaptersAction      = netToolsMenu->addAction("Network Adapters");
 QAction *netUsageAction      = netToolsMenu->addAction("Network Usage");
 QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup");
 QAction *pingAction          = netToolsMenu->addAction("Ping");
 QAction *portscanAction      = netToolsMenu->addAction("Port Scan");
+QAction *routeTableAction   = netToolsMenu->addAction("Route Table Viewer/Editor");
 QAction *tracertAction       = netToolsMenu->addAction("Traceroute");
 QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan");
 
@@ -3317,6 +3651,10 @@ auto deleteTempFiles = [&window]() {
     }
 };
 
+
+QObject::connect(routeTableAction, &QAction::triggered, [&window]() {
+    showRouteTableDialog(&window);
+});
 
 QObject::connect(netstatStatsAction, &QAction::triggered, [&window]() {
     showNetstatStatisticsDialog(&window);
