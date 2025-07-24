@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.2.0
+// Project version: 3.4.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -80,6 +80,9 @@
 #include <QVariant>
 #include <QPlainTextEdit>
 #include <QComboBox>
+#include <QFileDialog>
+
+
 
 // Windows API for network functions Share-scanner
 #pragma comment(lib, "Netapi32.lib")
@@ -101,7 +104,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.2.0";
+const QString VersionNumber = "3.4.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -2609,6 +2612,472 @@ void showMtuDiscoveryDialog(QWidget *parent) {
     dlg.exec();
 }
 
+
+void showHostsFileEditor(QWidget *parent) {
+    const QString hostsPath = "C:/Windows/System32/drivers/etc/hosts";
+    const QString backupDir = "C:/Users/Public/AppData/Local/IPGui";
+    const QString backupPath = backupDir + "/hosts.bak";
+
+    QDir().mkpath(backupDir); // Ensure backup directory exists
+
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Hosts File Editor");
+    dlg.resize(700, 500);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *hint = new QLabel(
+        "<b>Windows Hosts File Editor</b><br>"
+        "Each line: <code>IP_address hostname [# comment]</code><br>"
+        "Examples:<br>"
+        "<code>127.0.0.1   localhost</code><br>"
+        "<code>192.168.1.10   myserver.local # test server</code><br>"
+        "<span style='color:gray;'>Lines starting with # are comments. Blank lines are ignored.</span>"
+    );
+    hint->setTextFormat(Qt::RichText);
+    layout->addWidget(hint);
+
+    QPlainTextEdit *editor = new QPlainTextEdit;
+    QFont mono("Consolas");
+    mono.setStyleHint(QFont::Monospace);
+    editor->setFont(mono);
+    layout->addWidget(editor, 1);
+
+    // Load hosts file
+    QString originalText;
+    auto loadHosts = [&]() {
+        QFile file(hostsPath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            editor->setPlainText("# Could not open hosts file for reading.\n# Try running as administrator.");
+            originalText = editor->toPlainText();
+            return false;
+        }
+        QTextStream in(&file);
+        editor->setPlainText(in.readAll());
+        file.close();
+        originalText = editor->toPlainText();
+        return true;
+    };
+
+    // Robust backup: only overwrite if new backup is ready, just before save
+    auto backupHosts = [&]() -> bool {
+        QFileInfo fi(hostsPath);
+        if (!fi.exists() || !fi.isFile()) {
+            QMessageBox::warning(&dlg, "Backup Error", "Hosts file does not exist, cannot create backup.");
+            return false;
+        }
+        QString tmpBackupPath = backupPath + ".tmp";
+        QFile::remove(tmpBackupPath);
+        QFile file(hostsPath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QMessageBox::warning(&dlg, "Backup Error", "Could not read hosts file to create backup.");
+            return false;
+        }
+        QFile tmpBackup(tmpBackupPath);
+        if (!tmpBackup.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            QMessageBox::warning(&dlg, "Backup Error", "Could not write temporary backup file.");
+            file.close();
+            return false;
+        }
+        QTextStream in(&file), out(&tmpBackup);
+        out << in.readAll();
+        file.close();
+        tmpBackup.close();
+        QFile::remove(backupPath);
+        if (!QFile::rename(tmpBackupPath, backupPath)) {
+            QMessageBox::warning(&dlg, "Backup Error", "Could not finalize backup file.");
+            return false;
+        }
+        return true;
+    };
+
+    // Save hosts file (no backup here!)
+    auto saveHosts = [&](const QString &text) -> bool {
+        QFile file(hostsPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            return false;
+        }
+        QTextStream out(&file);
+        out << text;
+        file.close();
+        return true;
+    };
+
+    // Validate hosts file lines (returns error string or empty if OK)
+    auto validateHosts = [](const QString &text) -> QString {
+        QStringList lines = text.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+        QRegularExpression ipRe(R"(^\s*(\d{1,3}\.){3}\d{1,3}\s+[\w\.\-]+)");
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
+            if (line.isEmpty() || line.startsWith('#')) continue;
+            if (!ipRe.match(line).hasMatch()) {
+                return QString("Line %1: Invalid format: <code>%2</code>").arg(i+1).arg(line.toHtmlEscaped());
+            }
+        }
+        return "";
+    };
+
+    // Restore backup (with UAC if needed, always reloads file after)
+    auto restoreBackup = [&]() {
+        QFileInfo fi(backupPath);
+        if (!fi.exists() || !fi.isFile()) {
+            QMessageBox::warning(&dlg, "Restore Backup", "No backup file found at:\n" + backupPath);
+            return;
+        }
+        QFile::remove(hostsPath);
+        if (QFile::copy(backupPath, hostsPath)) {
+            QThread::msleep(200);
+            QFile verifyFile(hostsPath);
+            if (verifyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QString diskText = QTextStream(&verifyFile).readAll();
+                verifyFile.close();
+                QFile backupFile(backupPath);
+                if (backupFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                    QString backupText = QTextStream(&backupFile).readAll();
+                    backupFile.close();
+                    if (diskText == backupText) {
+                        loadHosts();
+                        QMessageBox::information(&dlg, "Restore Backup", "Backup restored.");
+                        return;
+                    }
+                }
+            }
+            QMessageBox::warning(&dlg, "Restore Backup", "Backup copied, but could not verify hosts file.");
+            loadHosts();
+            return;
+        }
+        // If failed, try with UAC (hidden window)
+        QString safeBackupPath = QDir::toNativeSeparators(backupPath);
+        QString safeHostsPath = QDir::toNativeSeparators(hostsPath);
+        QString psCmd =
+            QString("Copy-Item -Path \"%1\" -Destination \"%2\" -Force; exit $LASTEXITCODE")
+                .arg(safeBackupPath, safeHostsPath);
+        QStringList args;
+        args << "-WindowStyle" << "Hidden"
+             << "-Command"
+             << QString("Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile -Command \"%1\"' -Verb runAs -Wait").arg(psCmd.replace("\"", "\\\""));
+        int result = QProcess::execute("powershell", args);
+        QThread::msleep(200);
+        QFile verifyFile(hostsPath);
+        if (verifyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString diskText = QTextStream(&verifyFile).readAll();
+            verifyFile.close();
+            QFile backupFile(backupPath);
+            if (backupFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QString backupText = QTextStream(&backupFile).readAll();
+                backupFile.close();
+                if (diskText == backupText) {
+                    loadHosts();
+                    QMessageBox::information(&dlg, "Restore Backup", "Backup restored (with administrator rights).");
+                    return;
+                }
+            }
+        }
+        QMessageBox::critical(&dlg, "Restore Backup", "Failed to restore backup, even with elevation.");
+        loadHosts(); // Always reload to show the real file
+    };
+
+    // Buttons
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    QPushButton *saveBtn = new QPushButton("Save");
+    QPushButton *restoreBtn = new QPushButton("Restore Backup");
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnLayout->addWidget(saveBtn);
+    btnLayout->addWidget(restoreBtn);
+    btnLayout->addWidget(closeBtn);
+    layout->addLayout(btnLayout);
+
+    loadHosts();
+
+    // Track unsaved changes
+    bool isDirty = false;
+    QObject::connect(editor, &QPlainTextEdit::textChanged, [&]() {
+        isDirty = (editor->toPlainText() != originalText);
+        dlg.setWindowTitle(QString("Hosts File Editor%1").arg(isDirty ? " *" : ""));
+    });
+
+    // Save logic
+    QObject::connect(saveBtn, &QPushButton::clicked, [&]() {
+        QString text = editor->toPlainText();
+        QString err = validateHosts(text);
+        if (!err.isEmpty()) {
+            QMessageBox::warning(&dlg, "Syntax Error", "Hosts file not saved:\n" + err);
+            return;
+        }
+        // Backup just before saving!
+        if (!backupHosts()) {
+            QMessageBox::critical(&dlg, "Backup Failed", "Could not create backup. Save aborted.");
+            return;
+        }
+        // Try to save, if fails, try with UAC
+        bool saved = saveHosts(text);
+        bool elevated = false;
+        if (!saved) {
+            // Try to elevate and save using powershell (hidden window)
+            QString tmpPath = QDir::temp().filePath("hosts_tmp.txt");
+            QFile tmp(tmpPath);
+            if (tmp.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                QTextStream out(&tmp);
+                out << text;
+                tmp.close();
+                QString safeTmpPath = QDir::toNativeSeparators(tmpPath);
+                QString safeHostsPath = QDir::toNativeSeparators(hostsPath);
+                QString psCmd =
+                    QString("Copy-Item -Path \"%1\" -Destination \"%2\" -Force; exit $LASTEXITCODE")
+                        .arg(safeTmpPath, safeHostsPath);
+                QStringList args;
+                args << "-WindowStyle" << "Hidden"
+                     << "-Command"
+                     << QString("Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile -Command \"%1\"' -Verb runAs -Wait").arg(psCmd.replace("\"", "\\\""));
+                int result = QProcess::execute("powershell", args);
+                QFile::remove(tmpPath);
+                if (result == 0) {
+                    elevated = true;
+                } else {
+                    QMessageBox::critical(&dlg, "Save Failed", "Could not save hosts file, even with elevation.");
+                    loadHosts();
+                    return;
+                }
+            } else {
+                QMessageBox::critical(&dlg, "Save Failed", "Could not write temporary file for elevation.");
+                loadHosts();
+                return;
+            }
+        }
+        // After saving (normal or elevated), check if file matches what we wanted
+        QThread::msleep(200); // Give Windows a moment to finish the copy
+        QFile verifyFile(hostsPath);
+        if (verifyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString diskText = QTextStream(&verifyFile).readAll();
+            verifyFile.close();
+            if (diskText == text) {
+                QMessageBox::information(&dlg, "Saved", elevated
+                    ? "Hosts file saved with administrator rights."
+                    : "Hosts file saved successfully.");
+                originalText = text;
+                isDirty = false;
+                dlg.setWindowTitle("Hosts File Editor");
+                editor->setPlainText(text); // Ensure editor matches disk
+            } else {
+                QMessageBox::critical(&dlg, "Save Failed", "The hosts file could not be updated. (Check permissions, UAC prompt, or antivirus lock.)");
+                loadHosts(); // Reload actual file
+            }
+        } else {
+            QMessageBox::critical(&dlg, "Save Failed", "Could not read hosts file after saving.");
+            loadHosts();
+        }
+    });
+
+    // Restore backup logic
+    QObject::connect(restoreBtn, &QPushButton::clicked, restoreBackup);
+
+    // Close logic with unsaved changes prompt
+    auto tryClose = [&]() {
+        if (isDirty) {
+            auto ret = QMessageBox::question(
+                &dlg,
+                "Unsaved Changes",
+                "You have unsaved changes. Do you want to close without saving?",
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel
+            );
+            if (ret != QMessageBox::Yes)
+                return;
+        }
+        dlg.accept();
+    };
+    QObject::connect(closeBtn, &QPushButton::clicked, tryClose);
+
+    // Ctrl+W shortcut for close with prompt
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, tryClose);
+
+    dlg.exec();
+}
+
+void showNetstatStatisticsDialog(QWidget *parent) {
+    // Helper: humanize numbers
+    auto humanize = [](quint64 n) -> QString {
+        double value = n;
+        QStringList units = {"", "K", "M", "G", "T"};
+        int unit = 0;
+        while (value >= 1000 && unit < units.size() - 1) {
+            value /= 1000.0;
+            ++unit;
+        }
+        return QString::number(value, 'f', value < 10 ? 2 : (value < 100 ? 1 : 0)) + " " + units[unit];
+    };
+
+    // Map of stat name -> tooltip (all filled in, with line feeds)
+    QMap<QString, QString> tooltips = {
+        {"Packets Received",
+         "Total number of IP packets received by this computer,\n"
+         "including those with errors and those addressed to other hosts."},
+        {"Received Header Errors",
+         "Packets received with errors in the IP header\n"
+         "(checksum, length, or version errors).\n"
+         "High values may indicate network or hardware issues."},
+        {"Received Address Errors",
+         "Packets received with invalid destination IP addresses\n"
+         "(not assigned to this host or not a valid broadcast/multicast address)."},
+        {"Datagrams Forwarded",
+         "Packets received and forwarded to another network\n"
+         "(this computer acting as a router).\n"
+         "Should be zero unless routing is enabled."},
+        {"Unknown Protocols Received",
+         "Packets received using an unknown or unsupported protocol\n"
+         "(not TCP, UDP, ICMP, etc)."},
+        {"Received Packets Discarded",
+         "Packets received but discarded before delivery to higher layers\n"
+         "(due to buffer overflow, congestion, or filtering).\n"
+         "These packets were not addressed to this host or could not be processed."},
+        {"Received Packets Delivered",
+         "Packets successfully delivered to higher-layer protocols\n"
+         "(such as TCP, UDP, or ICMP)."},
+        {"Output Requests",
+         "Total number of IP packets sent by this computer,\n"
+         "including those generated locally and those forwarded (if routing is enabled)."},
+        {"Routing Discards",
+         "Packets discarded because no valid route was found\n"
+         "in the routing table."},
+        {"Discarded Output Packets",
+         "Packets discarded before being sent\n"
+         "(e.g., due to buffer overflow, congestion, or filtering)."},
+        {"Output Packet No Route",
+         "Packets that could not be sent because no route\n"
+         "to the destination was found."},
+        {"Reassembly Required",
+         "Number of IP fragments received that required reassembly\n"
+         "into complete packets."},
+        {"Reassembly Successful",
+         "Number of fragmented packets successfully reassembled."},
+        {"Reassembly Failures",
+         "Number of fragmented packets that could not be reassembled\n"
+         "(due to missing fragments or errors)."},
+        {"Datagrams Successfully Fragmented",
+         "Number of packets that were successfully fragmented\n"
+         "for transmission (when the packet was too large for the network's MTU)."},
+        {"Datagrams Failing Fragmentation",
+         "Number of packets that could not be fragmented\n"
+         "(often due to the 'Don't Fragment' flag or size/configuration issues)."},
+        {"Fragments Created",
+         "Number of IP fragments created for transmission\n"
+         "(when packets are split into smaller pieces to fit the network's MTU)."}
+    };
+
+    // Run netstat -s and parse output
+    QProcess proc;
+    proc.start("netstat", QStringList() << "-s");
+    proc.waitForFinished(2000);
+    QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+    // Parse IPv4 and IPv6 blocks
+    QMap<QString, QMap<QString, quint64>> stats; // "IPv4" or "IPv6" -> (stat name -> value)
+    QString currentProto;
+    QRegularExpression statLineRe(R"(^\s*([A-Za-z0-9 \-]+?)\s*=\s*([0-9]+))");
+    for (const QString &line : output.split('\n')) {
+        QString trimmed = line.trimmed();
+        if (trimmed.startsWith("IPv4 Statistics", Qt::CaseInsensitive)) {
+            currentProto = "IPv4";
+            continue;
+        }
+        if (trimmed.startsWith("IPv6 Statistics", Qt::CaseInsensitive)) {
+            currentProto = "IPv6";
+            continue;
+        }
+        if (currentProto.isEmpty()) continue;
+        QRegularExpressionMatch m = statLineRe.match(trimmed);
+        if (m.hasMatch()) {
+            QString name = m.captured(1).trimmed();
+            quint64 value = m.captured(2).toULongLong();
+            stats[currentProto][name] = value;
+        }
+    }
+
+    // Dialog setup
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Netstat Statistics");
+    dlg.setMinimumWidth(520);
+    addCtrlWClose(&dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *title = new QLabel("<b>Netstat Protocol Statistics</b><br>"
+        "<span style='color:gray;'>Shows key IPv4 and IPv6 network health counters.<br>"
+        "Hover any value for a detailed explanation.</span>");
+    title->setTextFormat(Qt::RichText);
+    layout->addWidget(title);
+
+    // Table for both IPv4 and IPv6
+    QTableWidget *table = new QTableWidget();
+    table->setColumnCount(3);
+    table->setHorizontalHeaderLabels(QStringList() << "Statistic" << "IPv4" << "IPv6");
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setFocusPolicy(Qt::NoFocus);
+
+    // Collect all stat names in order of IPv4 block
+    QStringList statNames = stats["IPv4"].keys();
+    // Add any IPv6-only stats
+    for (const QString &k : stats["IPv6"].keys()) {
+        if (!statNames.contains(k))
+            statNames.append(k);
+    }
+    table->setRowCount(statNames.size());
+
+    QBrush blue(QColor("#1c2684"));
+    QBrush green(QColor("#1a7d2c"));
+    QBrush red(QColor("#c80000"));
+    QBrush gray(QColor("#888"));
+
+    for (int row = 0; row < statNames.size(); ++row) {
+        QString stat = statNames[row];
+        QTableWidgetItem *nameItem = new QTableWidgetItem(stat);
+        nameItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+        nameItem->setForeground(blue);
+        nameItem->setToolTip(tooltips.value(stat, stat));
+
+        // IPv4 value
+        quint64 v4 = stats["IPv4"].value(stat, 0);
+        QTableWidgetItem *v4Item = new QTableWidgetItem(humanize(v4));
+        v4Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        v4Item->setToolTip(QString("%1\n\n%2").arg(v4).arg(tooltips.value(stat, "")));
+        v4Item->setForeground(v4 == 0 ? gray : (stat.contains("Error", Qt::CaseInsensitive) || stat.contains("Fail", Qt::CaseInsensitive) || stat.contains("Discard", Qt::CaseInsensitive) ? red : green));
+        table->setItem(row, 1, v4Item);
+
+        // IPv6 value
+        quint64 v6 = stats["IPv6"].value(stat, 0);
+        QTableWidgetItem *v6Item = new QTableWidgetItem(humanize(v6));
+        v6Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        v6Item->setToolTip(QString("%1\n\n%2").arg(v6).arg(tooltips.value(stat, "")));
+        v6Item->setForeground(v6 == 0 ? gray : (stat.contains("Error", Qt::CaseInsensitive) || stat.contains("Fail", Qt::CaseInsensitive) || stat.contains("Discard", Qt::CaseInsensitive) ? red : green));
+        table->setItem(row, 2, v6Item);
+
+        table->setItem(row, 0, nameItem);
+    }
+
+    table->resizeColumnsToContents();
+    layout->addWidget(table);
+
+    QLabel *legend = new QLabel(
+        "<span style='color:#1a7d2c; font-weight:bold;'>Green:</span> Normal/healthy<br>"
+        "<span style='color:#c80000; font-weight:bold;'>Red:</span> Errors, discards, or failures<br>"
+        "<span style='color:#888;'>Gray:</span> Zero (not seen or not applicable)"
+    );
+    legend->setTextFormat(Qt::RichText);
+    layout->addWidget(legend);
+
+    QPushButton *closeBtn = new QPushButton("Close");
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    layout->addWidget(closeBtn);
+
+    dlg.adjustSize();
+    dlg.exec();
+}
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -2800,21 +3269,62 @@ QMenu *netToolsMenu = fileMenu->addMenu("NetTools");
 
 
 // Add action to NetTools submenu
-QAction *arpAction           = netToolsMenu->addAction("Arp...");
-QAction *dhcpStatusAction    = netToolsMenu->addAction("DHCP Status...");
-QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check...");
-QAction *netscanAction       = netToolsMenu->addAction("IP Scanner...");
-QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery...");
+QAction *arpAction           = netToolsMenu->addAction("Arp");
+QAction *dhcpStatusAction    = netToolsMenu->addAction("DHCP Status");
+QAction *hostsFileAction     = netToolsMenu->addAction("Hosts File Editor");
+QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check");
+QAction *netscanAction       = netToolsMenu->addAction("IP Scanner");
+QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery");
+QAction *netstatStatsAction = netToolsMenu->addAction("Netstat Statistics");
 QAction *adaptersAction      = netToolsMenu->addAction("Network Adapters");
-QAction *netUsageAction      = netToolsMenu->addAction("Network Usage...");
-QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup...");
-QAction *pingAction          = netToolsMenu->addAction("Ping...");
-QAction *portscanAction      = netToolsMenu->addAction("Port Scan...");
-QAction *tracertAction       = netToolsMenu->addAction("Traceroute...");
-QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan...");
+QAction *netUsageAction      = netToolsMenu->addAction("Network Usage");
+QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup");
+QAction *pingAction          = netToolsMenu->addAction("Ping");
+QAction *portscanAction      = netToolsMenu->addAction("Port Scan");
+QAction *tracertAction       = netToolsMenu->addAction("Traceroute");
+QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan");
 
 
-QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top"); // Dot first, no checkmark
+QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top");
+
+QAction *deleteTempAction = fileMenu->addAction("Delete Temporary Files");
+
+
+// Add the slot/function to delete the temp folder
+auto deleteTempFiles = [&window]() {
+    QString tempDir = "C:/Users/Public/AppData/Local/IPGui";
+    if (!QDir(tempDir).exists()) {
+        QMessageBox::information(&window, "Delete Temporary Files", "No temporary files found.");
+        return;
+    }
+    int ret = QMessageBox::question(
+        &window,
+        "Delete Temporary Files",
+        "Are you sure you want to delete all temporary files for this application?\n\n"
+        "This will remove:\n" + tempDir,
+        QMessageBox::Yes | QMessageBox::Cancel,
+        QMessageBox::Cancel
+    );
+    if (ret != QMessageBox::Yes)
+        return;
+
+    QDir dir(tempDir);
+    bool ok = dir.removeRecursively();
+    if (ok) {
+        QMessageBox::information(&window, "Delete Temporary Files", "Temporary files deleted.");
+    } else {
+        QMessageBox::warning(&window, "Delete Temporary Files", "Failed to delete some or all temporary files.");
+    }
+};
+
+
+QObject::connect(netstatStatsAction, &QAction::triggered, [&window]() {
+    showNetstatStatisticsDialog(&window);
+});
+
+// Connect the menu action
+QObject::connect(deleteTempAction, &QAction::triggered, deleteTempFiles);
+
 
 // Do NOT call setCheckable(true)!
 
@@ -2827,6 +3337,8 @@ auto updateAlwaysOnTopText = [&]() {
 };
 updateAlwaysOnTopText();
 
+
+QObject::connect(hostsFileAction, &QAction::triggered, [&]() { showHostsFileEditor(&window); });
 
 QObject::connect(mtuDiscoveryAction, &QAction::triggered, [&]() {
     showMtuDiscoveryDialog(&window);
