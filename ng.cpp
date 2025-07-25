@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.5.0
+// Project version: 3.6.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -105,7 +105,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.5.0";
+const QString VersionNumber = "3.6.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -3090,8 +3090,8 @@ void showRouteTableDialog(QWidget *parent) {
 
     QLabel *title = new QLabel(
         "<b>Windows Route Table</b><br>"
-        "<span style='color:gray;'>Shows all active IPv4 and IPv6 routes.<br>"
-        "You can delete or add routes.<br>"
+        "<span style='color:gray;'>Shows all active IPv4 and IPv6 routes. - "
+        "You can delete or add routes. - "
         "Mouseover any value for technical details.</span>");
     title->setTextFormat(Qt::RichText);
     layout->addWidget(title);
@@ -3411,6 +3411,354 @@ void showRouteTableDialog(QWidget *parent) {
     dlg.exec();
 }
 
+void showDnsCacheDialog(QWidget *parent) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle("DNS Cache Viewer");
+    dlg.setMinimumWidth(900);
+    addCtrlWClose(&dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *title = new QLabel(
+        "<b>DNS Cache Viewer</b><br>"
+        "<span style='color:gray;'>Shows all cached DNS entries on your system. - Mouseover any value for technical details.</span>");
+    title->setTextFormat(Qt::RichText);
+    layout->addWidget(title);
+
+    // Table setup
+    QTableWidget *table = new QTableWidget();
+    table->setColumnCount(5);
+    table->setHorizontalHeaderLabels(QStringList()
+        << "Hostname"
+        << "Type"
+        << "IP Address"
+        << "TTL (s)"
+        << "Status");
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::ContiguousSelection);
+    table->setSelectionBehavior(QAbstractItemView::SelectItems);
+    table->setFocusPolicy(Qt::StrongFocus);
+    table->setWordWrap(true);
+
+    // Tooltips for columns
+    QStringList colTips = {
+        "The domain name or hostname that was resolved.\n(Technical: DNS query name.)",
+        "Record type (A=IPv4, AAAA=IPv6, CNAME, etc).\n(Technical: DNS resource record type.)",
+        "The resolved IP address(es), IPv4 first, then IPv6.\n(Technical: DNS answer data.)",
+        "Time to live (seconds) before this entry expires.\n(Technical: Remaining TTL in cache.)",
+        "Status of this entry (e.g. Success, Negative, etc).\n(Technical: Indicates if the entry is valid or failed.)"
+    };
+    for (int i = 0; i < table->columnCount(); ++i)
+        table->horizontalHeaderItem(i)->setToolTip(colTips[i]);
+
+    layout->addWidget(table);
+
+    // Parse DNS cache
+    struct DnsEntry {
+        QString hostname, type, data, ttl, status;
+    };
+    QList<DnsEntry> entries;
+
+    // Run "ipconfig /displaydns" and parse output
+    QProcess proc;
+    proc.start("ipconfig", QStringList() << "/displaydns");
+    proc.waitForFinished(2000);
+    QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+    QString hostname, ttl, status;
+    QString currentType;
+    QStringList currentData;
+    auto flushTypeData = [&]() {
+        if (!hostname.isEmpty() && !currentType.isEmpty()) {
+            for (const QString &data : currentData) {
+                entries.append({hostname, currentType, data, ttl, status});
+            }
+        }
+        currentType.clear();
+        currentData.clear();
+    };
+
+    QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines[i].trimmed();
+        if (line.startsWith("Record Name", Qt::CaseInsensitive)) {
+            flushTypeData();
+            hostname = line.section(':', 1).trimmed();
+            ttl.clear();
+            status = "Success";
+        } else if (line.startsWith("Record Type", Qt::CaseInsensitive)) {
+            flushTypeData();
+            QString t = line.section(':', 1).trimmed();
+            if (t == "1") currentType = "A";
+            else if (t == "28") currentType = "AAAA";
+            else if (t == "5") currentType = "CNAME";
+            else currentType = t;
+        } else if (line.startsWith("Data", Qt::CaseInsensitive)) {
+            QString data = line.section(':', 1).trimmed();
+            currentData.append(data);
+        } else if (line.startsWith("Time To Live", Qt::CaseInsensitive)) {
+            ttl = line.section(':', 1).trimmed();
+        } else if (line.contains("No records", Qt::CaseInsensitive)) {
+            flushTypeData();
+            entries.append({hostname, "-", "-", "-", "Negative"});
+        } else if (line.startsWith("-----")) {
+            flushTypeData();
+            hostname.clear();
+            ttl.clear();
+            status = "Success";
+        }
+    }
+    flushTypeData();
+
+    // Group by hostname for live lookup and merging
+    struct HostResult {
+        QString hostname;
+        QStringList ipv4s;
+        QStringList ipv6s;
+        QString cname;
+        QString ttl;
+        QString status;
+    };
+    QMap<QString, HostResult> hostMap;
+
+    for (const DnsEntry &e : entries) {
+        if (e.status == "Negative") {
+            HostResult &hr = hostMap[e.hostname];
+            hr.hostname = e.hostname;
+            hr.status = "Negative";
+            continue;
+        }
+        HostResult &hr = hostMap[e.hostname];
+        hr.hostname = e.hostname;
+        hr.ttl = e.ttl;
+        hr.status = e.status;
+        if (e.type == "A" && QRegularExpression(R"(^(\d{1,3}\.){3}\d{1,3}$)").match(e.data).hasMatch()) {
+            hr.ipv4s << e.data;
+        } else if (e.type == "AAAA" && e.data.contains(':')) {
+            hr.ipv6s << e.data;
+        } else if (e.type == "CNAME" && e.data.contains('.')) {
+            hr.cname = e.data;
+        }
+    }
+
+    // For any host missing either IPv4 or IPv6, do a live lookup
+    for (auto it = hostMap.begin(); it != hostMap.end(); ++it) {
+        HostResult &hr = it.value();
+        if (hr.status == "Negative") continue;
+        QHostInfo info = QHostInfo::fromName(hr.hostname);
+        for (const QHostAddress &addr : info.addresses()) {
+            if (addr.protocol() == QAbstractSocket::IPv4Protocol) {
+                QString ip = addr.toString();
+                if (!hr.ipv4s.contains(ip))
+                    hr.ipv4s << ip;
+            } else if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
+                QString ip = addr.toString();
+                if (!hr.ipv6s.contains(ip))
+                    hr.ipv6s << ip;
+            }
+        }
+    }
+
+    // Prepare final entries for display
+    QList<DnsEntry> finalEntries;
+    for (const auto &hr : hostMap) {
+        if (hr.status == "Negative") {
+            finalEntries.append({hr.hostname, "-", "-", "-", "Negative"});
+            continue;
+        }
+        QStringList typeLines;
+        typeLines << "A" << "AAAA";
+        if (!hr.cname.isEmpty()) typeLines << "CNAME";
+        QString type = typeLines.join("\n");
+
+        QStringList dataLines;
+        if (!hr.ipv4s.isEmpty())
+            dataLines << hr.ipv4s;
+        else
+            dataLines << "IPv4 not found";
+        if (!hr.ipv6s.isEmpty())
+            dataLines << hr.ipv6s;
+        else
+            dataLines << "IPv6 not found";
+        if (!hr.cname.isEmpty())
+            dataLines << hr.cname;
+        QString data = dataLines.join("\n");
+
+        finalEntries.append({hr.hostname, type, data, hr.ttl, hr.status});
+    }
+
+    // Sorting state
+    int sortColumn = 0;
+    Qt::SortOrder sortOrder = Qt::AscendingOrder;
+
+    auto updateHeaderArrows = [&]() {
+        for (int i = 0; i < table->columnCount(); ++i) {
+            QString label = table->horizontalHeaderItem(i)->text();
+            label = label.split(' ').first();
+            if (i == sortColumn)
+                label += (sortOrder == Qt::AscendingOrder ? " ▲" : " ▼");
+            table->horizontalHeaderItem(i)->setText(label);
+        }
+    };
+
+    auto sortEntries = [&](QList<DnsEntry> list) -> QList<DnsEntry> {
+        std::function<bool(const DnsEntry&, const DnsEntry&)> cmp;
+        switch (sortColumn) {
+            case 0:
+                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.hostname.toLower() < b.hostname.toLower()
+                                                           : a.hostname.toLower() > b.hostname.toLower();
+                }; break;
+            case 1:
+                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.type < b.type : a.type > b.type;
+                }; break;
+            case 2:
+                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.data < b.data : a.data > b.data;
+                }; break;
+            case 3:
+                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
+                    bool okA, okB;
+                    int ttlA = a.ttl.toInt(&okA), ttlB = b.ttl.toInt(&okB);
+                    if (okA && okB)
+                        return sortOrder == Qt::AscendingOrder ? ttlA < ttlB : ttlA > ttlB;
+                    return sortOrder == Qt::AscendingOrder ? a.ttl < b.ttl : a.ttl > b.ttl;
+                }; break;
+            case 4:
+                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
+                    return sortOrder == Qt::AscendingOrder ? a.status < b.status : a.status > b.status;
+                }; break;
+            default: cmp = [](const DnsEntry&, const DnsEntry&) { return false; };
+        }
+        std::sort(list.begin(), list.end(), cmp);
+        return list;
+    };
+
+    auto fillTable = [&]() {
+        QList<DnsEntry> sorted = sortEntries(finalEntries);
+        table->setRowCount(sorted.size());
+        QFont cellFont("Segoe UI", 10, QFont::Bold);
+        QFontMetrics fm(cellFont);
+        int minRowHeight = fm.height() + 6;
+        for (int row = 0; row < sorted.size(); ++row) {
+            const DnsEntry &e = sorted[row];
+            QStringList fields = {e.hostname, e.type, e.data, e.ttl, e.status};
+            for (int col = 0; col < fields.size(); ++col) {
+                if (col == 2) {
+                    QTextEdit *edit = new QTextEdit;
+                    edit->setReadOnly(true);
+                    edit->setFrameStyle(QFrame::NoFrame);
+                    edit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                    edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                    edit->setFont(cellFont);
+                    edit->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+                    edit->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+
+                    QStringList lines = fields[col].split('\n');
+                    QString html;
+                    for (const QString &line : lines) {
+                        QString safe = line.toHtmlEscaped();
+                        if (line.trimmed() == "IPv4 not found" || line.trimmed() == "IPv6 not found")
+                            html += "<span style='color:#888;'>" + safe + "</span><br>";
+                        else if (QRegularExpression(R"(^(\d{1,3}\.){3}\d{1,3}$)").match(line).hasMatch())
+                            html += "<span style='color:#7c3cff;'>" + safe + "</span><br>";
+                        else if (line.contains(':'))
+                            html += "<span style='color:#3c1c5c;'>" + safe + "</span><br>";
+                        else
+                            html += safe + "<br>";
+                    }
+                    if (html.endsWith("<br>")) html.chop(4);
+                    edit->setHtml(html);
+                    table->setCellWidget(row, col, edit);
+                } else {
+                    QTableWidgetItem *item = new QTableWidgetItem(fields[col]);
+                    item->setFont(cellFont);
+                    item->setTextAlignment(Qt::AlignLeft | Qt::AlignTop);
+                    if (col == 0) item->setForeground(QBrush(QColor("#1c2684")));
+                    else if (col == 1) item->setForeground(QBrush(QColor("#1a7d2c")));
+                    else if (col == 3) item->setForeground(QBrush(QColor("#888")));
+                    else if (col == 4) {
+                        QBrush statusBrush(QColor("#1a7d2c"));
+                        if (e.status == "Negative")
+                            statusBrush = QBrush(QColor("#c80000"));
+                        item->setForeground(statusBrush);
+                    }
+                    item->setToolTip(colTips[col]);
+                    table->setItem(row, col, item);
+                }
+            }
+            int linesType = sorted[row].type.count('\n') + 1;
+            int linesData = sorted[row].data.count('\n') + 1;
+            int lines = qMax(linesType, linesData);
+            table->setRowHeight(row, qMax(minRowHeight, lines * fm.lineSpacing() + 6));
+        }
+        table->resizeColumnsToContents();
+        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        for (int i = 3; i < table->columnCount(); ++i)
+            table->horizontalHeader()->setSectionResizeMode(i, QHeaderView::Stretch);
+        updateHeaderArrows();
+    };
+
+    QObject::connect(table->horizontalHeader(), &QHeaderView::sectionClicked, [&](int col) {
+        if (sortColumn == col) {
+            sortOrder = (sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+        } else {
+            sortColumn = col;
+            sortOrder = (col == 0) ? Qt::AscendingOrder : Qt::DescendingOrder;
+        }
+        fillTable();
+    });
+
+    fillTable();
+
+    if (finalEntries.isEmpty()) {
+        QLabel *emptyMsg = new QLabel("<b>No DNS cache entries found.</b><br>Try browsing some websites or running <code>nslookup</code> in a terminal, then refresh.");
+        emptyMsg->setAlignment(Qt::AlignCenter);
+        layout->addWidget(emptyMsg);
+    }
+
+    QGridLayout *legendLayout = new QGridLayout();
+    legendLayout->setColumnStretch(0, 1);
+    legendLayout->setColumnStretch(1, 1);
+    legendLayout->setColumnStretch(2, 1);
+
+    QLabel *greenLbl = new QLabel("<span style='color:#1a7d2c; font-weight:bold;'>Green:</span> Record type, valid status");
+    QLabel *purple4Lbl = new QLabel("<span style='color:#7c3cff; font-weight:bold;'>Purple:</span> IPv4 address");
+    QLabel *blueLbl = new QLabel("<span style='color:#1c2684;'>Blue:</span> Hostname");
+    QLabel *redLbl = new QLabel("<span style='color:#c80000; font-weight:bold;'>Red:</span> Negative/failed entry or unknown type");
+    QLabel *purple6Lbl = new QLabel("<span style='color:#3c1c5c; font-weight:bold;'>Dark purple:</span> IPv6 address");
+    QLabel *grayLbl = new QLabel("<span style='color:#888;'>Gray:</span> Not found markers");
+
+    greenLbl->setTextFormat(Qt::RichText);
+    purple4Lbl->setTextFormat(Qt::RichText);
+    blueLbl->setTextFormat(Qt::RichText);
+    redLbl->setTextFormat(Qt::RichText);
+    purple6Lbl->setTextFormat(Qt::RichText);
+    grayLbl->setTextFormat(Qt::RichText);
+
+    legendLayout->addWidget(greenLbl, 0, 0);
+    legendLayout->addWidget(purple4Lbl, 0, 1);
+    legendLayout->addWidget(blueLbl, 0, 2);
+    legendLayout->addWidget(redLbl, 1, 0);
+    legendLayout->addWidget(purple6Lbl, 1, 1);
+    legendLayout->addWidget(grayLbl, 1, 2);
+
+    QWidget *legendWidget = new QWidget();
+    legendWidget->setLayout(legendLayout);
+    layout->addWidget(legendWidget);
+
+    QPushButton *closeBtn = new QPushButton("Close");
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    layout->addWidget(closeBtn);
+
+    dlg.adjustSize();
+    dlg.exec();
+}
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -3604,6 +3952,7 @@ QMenu *netToolsMenu = fileMenu->addMenu("NetTools");
 // Add action to NetTools submenu
 QAction *arpAction           = netToolsMenu->addAction("Arp");
 QAction *dhcpStatusAction    = netToolsMenu->addAction("DHCP Status");
+QAction *dnsCacheAction      = netToolsMenu->addAction("DNS Cache Viewer");
 QAction *hostsFileAction     = netToolsMenu->addAction("Hosts File Editor");
 QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check");
 QAction *netscanAction       = netToolsMenu->addAction("IP Scanner");
@@ -3651,6 +4000,10 @@ auto deleteTempFiles = [&window]() {
     }
 };
 
+
+QObject::connect(dnsCacheAction, &QAction::triggered, [&window]() {
+    showDnsCacheDialog(&window);
+});
 
 QObject::connect(routeTableAction, &QAction::triggered, [&window]() {
     showRouteTableDialog(&window);
