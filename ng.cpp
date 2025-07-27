@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.6.0
+// Project version: 3.8.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -82,6 +82,14 @@
 #include <QComboBox>
 #include <QFileDialog>
 #include <QGroupBox>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QClipboard>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
+#include <QMutex>
 
 
 
@@ -105,7 +113,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.6.0";
+const QString VersionNumber = "3.8.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Helper: Get the path to the shared CSV file
@@ -116,6 +124,30 @@ QString getPortInfoCsvPath() {
     QDir().mkpath(dir); // Ensure the directory exists
     return dir + "/service-names-port-numbers.csv";
 }
+
+// Helper: Enumerate shares on a host using NetShareEnum
+QList<QList<QString>> getSharesOnHost(const QString &host) {
+    QList<QList<QString>> shares;
+    SHARE_INFO_1 *pBuf = nullptr;
+    DWORD entriesRead = 0, totalEntries = 0;
+    NET_API_STATUS nStatus = NetShareEnum(
+        (wchar_t*)host.utf16(), 1, (LPBYTE*)&pBuf, MAX_PREFERRED_LENGTH, &entriesRead, &totalEntries, nullptr);
+    if (nStatus == NERR_Success && pBuf) {
+        SHARE_INFO_1 *p = pBuf;
+        for (DWORD i = 0; i < entriesRead; ++i, ++p) {
+            QString name = QString::fromWCharArray(p->shi1_netname);
+            QString type = (p->shi1_type == STYPE_DISKTREE) ? "Disk" :
+                           (p->shi1_type == STYPE_PRINTQ) ? "Printer" :
+                           (p->shi1_type == STYPE_DEVICE) ? "Device" :
+                           (p->shi1_type == STYPE_IPC) ? "IPC" : "Other";
+            QString comment = p->shi1_remark ? QString::fromWCharArray(p->shi1_remark) : "";
+            shares.append({name, type, comment});
+        }
+        NetApiBufferFree(pBuf);
+    }
+    return shares;
+}
+
 
 // Helper: Download the CSV to the shared location
 bool downloadPortInfoCsv(const QString &path, QWidget *parent = nullptr) {
@@ -3759,6 +3791,718 @@ void showDnsCacheDialog(QWidget *parent) {
     dlg.exec();
 }
 
+
+void showWhoisLookupDialog(QWidget *parent) {
+    const QString localPath = "C:/Users/Public/AppData/Local/IPGui/tld-rdap-list.json";
+    const QString url = "https://data.iana.org/rdap/dns.json";
+
+    // Helper: Download JSON file if missing or older than 7 days
+    auto ensureRdapList = [&]() -> bool {
+        QFileInfo fi(localPath);
+        bool needDownload = !fi.exists() || fi.lastModified().daysTo(QDateTime::currentDateTime()) > 7;
+        if (!needDownload) return true;
+
+        QNetworkAccessManager mgr;
+        QUrl qurl(url);
+        QNetworkRequest req(qurl);
+        QNetworkReply *reply = mgr.get(req);
+
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timer.start(8000);
+        loop.exec();
+
+        bool ok = false;
+        if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+            QByteArray data = reply->readAll();
+            QDir().mkpath(QFileInfo(localPath).absolutePath());
+            QFile file(localPath);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                file.write(data);
+                file.close();
+                ok = true;
+            }
+        }
+        reply->deleteLater();
+        return ok || QFileInfo(localPath).exists();
+    };
+
+    // Helper: Load TLD->RDAP endpoint map from local JSON
+    auto loadRdapMap = [&]() -> QMap<QString, QString> {
+        QMap<QString, QString> map;
+        QFile file(localPath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+            return map;
+        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        QJsonObject obj = doc.object();
+        QJsonArray services = obj["services"].toArray();
+        for (const QJsonValue &serviceVal : services) {
+            QJsonArray arr = serviceVal.toArray();
+            if (arr.size() >= 2) {
+                QJsonArray tlds = arr[0].toArray();
+                QJsonArray servers = arr[1].toArray();
+                QString rdapServer;
+                for (const QJsonValue &serverVal : servers) {
+                    QString server = serverVal.toString();
+                    if (server.startsWith("https://") || server.startsWith("http://")) {
+                        rdapServer = server;
+                        break;
+                    }
+                }
+                if (!rdapServer.isEmpty()) {
+                    for (const QJsonValue &tldVal : tlds) {
+                        QString tld = tldVal.toString();
+                        if (!tld.startsWith(".")) tld = "." + tld;
+                        map[tld.toLower()] = rdapServer;
+                    }
+                }
+            }
+        }
+        return map;
+    };
+
+    // Helper: Make URLs and emails clickable in text (no double escaping)
+    auto makeLinksClickable = [](const QString &text) -> QString {
+        QString result;
+        int lastPos = 0;
+        QRegularExpression re("([\\w\\.\\-]+@[\\w\\.\\-]+\\.\\w+)|(https?://[^\\s<>\"]+)");
+        auto matches = re.globalMatch(text);
+        while (matches.hasNext()) {
+            QRegularExpressionMatch match = matches.next();
+            int start = match.capturedStart();
+            int end = match.capturedEnd();
+            // Add text before the match, HTML-escaped
+            result += text.mid(lastPos, start - lastPos).toHtmlEscaped();
+            QString email = match.captured(1);
+            QString url = match.captured(2);
+            if (!email.isEmpty()) {
+                result += "<a href=\"mailto:" + email + "\" style='color:#1c2684; font-size:10pt;'>" + email.toHtmlEscaped() + "</a>";
+            } else if (!url.isEmpty()) {
+                result += "<a href=\"" + url + "\" style='color:#1c2684; font-size:10pt;'>" + url.toHtmlEscaped() + "</a>";
+            }
+            lastPos = end;
+        }
+        result += text.mid(lastPos).toHtmlEscaped();
+        return result;
+    };
+
+    // Ensure list is available
+    if (!ensureRdapList()) {
+        QMessageBox::warning(parent, "RDAP Lookup", "Could not download or load the TLD RDAP list.\nCheck your internet connection.");
+        return;
+    }
+    QMap<QString, QString> rdapMap = loadRdapMap();
+    if (rdapMap.isEmpty()) {
+        QMessageBox::warning(parent, "RDAP Lookup", "Could not parse the TLD RDAP list.");
+        return;
+    }
+
+    // --- Dialog UI ---
+    QDialog dlg(parent);
+    dlg.setWindowTitle("RDAP Domain Lookup");
+    dlg.setMinimumWidth(420);
+    dlg.setMaximumWidth(700);
+    addCtrlWClose(&dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *title = new QLabel(
+        "<b>RDAP Domain Lookup</b><br>"
+        "<span style='color:gray;'>Enter a domain (any TLD).<br>"
+        "The correct RDAP server is chosen automatically.</span>");
+    title->setTextFormat(Qt::RichText);
+    layout->addWidget(title);
+
+    QLineEdit *domainEdit = new QLineEdit;
+    domainEdit->setPlaceholderText("e.g. www.google.com");
+    domainEdit->setToolTip("Enter a domain name (any TLD).");
+    layout->addWidget(domainEdit);
+
+    QPushButton *lookupBtn = new QPushButton("Lookup");
+    lookupBtn->setToolTip("Perform RDAP lookup for the entered domain.");
+    lookupBtn->setEnabled(false);
+    layout->addWidget(lookupBtn);
+
+    QTextBrowser *output = new QTextBrowser; // <-- Use QTextBrowser!
+    output->setReadOnly(true);
+    output->setFontFamily("Consolas");
+    output->setMinimumHeight(180);
+    output->setMaximumHeight(400);
+    output->setStyleSheet("background:#fff; color:#222; border:1px solid #bbb; border-radius:4px;");
+    output->setOpenExternalLinks(true); // <-- Make links clickable!
+    layout->addWidget(output);
+
+    QPushButton *closeBtn = new QPushButton("Close");
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    layout->addWidget(closeBtn);
+
+    QObject::connect(domainEdit, &QLineEdit::textChanged, [=]() {
+        lookupBtn->setEnabled(!domainEdit->text().trimmed().isEmpty());
+    });
+
+    QObject::connect(lookupBtn, &QPushButton::clicked, [&]() {
+        QString domain = domainEdit->text().trimmed().toLower();
+        if (domain.isEmpty()) return;
+        // Extract TLD (handles .co.uk etc)
+        QString tld;
+        int lastDot = domain.lastIndexOf('.');
+        if (lastDot != -1) {
+            tld = domain.mid(lastDot);
+            if (tld == ".uk" && domain.endsWith(".co.uk")) tld = ".co.uk";
+        }
+        QString rdapServer = rdapMap.value(tld, QString());
+        if (rdapServer.isEmpty()) {
+            output->setPlainText("No RDAP server found for this TLD.");
+            output->setToolTip("No RDAP server found.");
+            return;
+        }
+        // Compose RDAP URL
+        QString rdapUrl = rdapServer;
+        if (!rdapUrl.endsWith('/')) rdapUrl += '/';
+        rdapUrl += "domain/" + domain;
+
+        output->setPlainText(QString("Querying RDAP server:\n%1 ...").arg(rdapUrl));
+        output->setToolTip(QString("RDAP server: %1").arg(rdapServer));
+
+        // RDAP query via QNetworkAccessManager
+        QNetworkAccessManager mgr;
+        QUrl qurl(rdapUrl);
+        QNetworkRequest req(qurl);
+        req.setHeader(QNetworkRequest::UserAgentHeader, "IPGui RDAP Client");
+        QNetworkReply *reply = mgr.get(req);
+
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timer.start(10000);
+        loop.exec();
+
+        if (!reply->isFinished() || reply->error() != QNetworkReply::NoError) {
+            output->setPlainText(QString("Could not connect to RDAP server.\n%1").arg(reply->errorString()));
+            reply->deleteLater();
+            return;
+        }
+
+        QByteArray response = reply->readAll();
+        reply->deleteLater();
+
+        // Try to parse as JSON
+        QJsonParseError err;
+        QJsonDocument doc = QJsonDocument::fromJson(response, &err);
+        if (doc.isNull()) {
+            output->setPlainText("Received non-JSON response:\n" + QString::fromUtf8(response.left(4096)));
+            return;
+        }
+
+        QJsonObject obj = doc.object();
+        // Table with dark blue value text, value cells smaller font
+        QString html = "<b>RDAP Domain Information</b><br><table cellpadding='4' cellspacing='0'>";
+
+        auto val = [&](const QString &s) {
+            return "<span style='color:#1c2684; font-size:10pt;'>" + makeLinksClickable(s) + "</span>";
+        };
+
+        // Domain name
+        QString domainName = obj.value("ldhName").toString();
+        if (!domainName.isEmpty())
+            html += "<tr><td><b>Domain:</b></td><td>" + val(domainName) + "</td></tr>";
+
+        // Handle
+        QString handle = obj.value("handle").toString();
+        if (!handle.isEmpty())
+            html += "<tr><td><b>Handle:</b></td><td>" + val(handle) + "</td></tr>";
+
+        // Registration/last changed dates
+        QJsonArray events = obj.value("events").toArray();
+        QString regDate, lastChanged;
+        for (const QJsonValue &ev : events) {
+            QJsonObject e = ev.toObject();
+            QString action = e.value("eventAction").toString();
+            QString date = e.value("eventDate").toString();
+            if (action == "registration") regDate = date;
+            else if (action == "last changed") lastChanged = date;
+        }
+        if (!regDate.isEmpty())
+            html += "<tr><td><b>Registered:</b></td><td>" + val(regDate) + "</td></tr>";
+        if (!lastChanged.isEmpty())
+            html += "<tr><td><b>Last Changed:</b></td><td>" + val(lastChanged) + "</td></tr>";
+
+        // Registrar/Registrant/Contacts
+        QJsonArray entities = obj.value("entities").toArray();
+        QString registrar, registrant, techContact, adminContact;
+        QString registrarEmail, registrantEmail, techEmail, adminEmail;
+        QString registrarPhone, registrantPhone, techPhone, adminPhone;
+        QString registrarOrg, registrantOrg;
+        QString registrarUrl;
+        for (const QJsonValue &entVal : entities) {
+            QJsonObject ent = entVal.toObject();
+            QJsonArray roles = ent.value("roles").toArray();
+            QStringList roleList;
+            for (const QJsonValue &r : roles) roleList << r.toString();
+            QJsonArray vcard = ent.value("vcardArray").toArray();
+            QString org, fn, email, phone, url;
+            if (vcard.size() == 2) {
+                QJsonArray vfields = vcard[1].toArray();
+                for (const QJsonValue &fieldVal : vfields) {
+                    QJsonArray field = fieldVal.toArray();
+                    if (field.size() < 4) continue;
+                    QString key = field[0].toString();
+                    QString value = field[3].toString();
+                    if (key == "fn") fn = value;
+                    else if (key == "org") org = value;
+                    else if (key == "email") email = value;
+                    else if (key == "tel") phone = value;
+                    else if (key == "url") url = value;
+                }
+            }
+            if (roleList.contains("registrar")) {
+                registrar = fn.isEmpty() ? org : fn;
+                registrarEmail = email;
+                registrarPhone = phone;
+                registrarOrg = org;
+                registrarUrl = url;
+            }
+            if (roleList.contains("registrant")) {
+                registrant = fn.isEmpty() ? org : fn;
+                registrantEmail = email;
+                registrantPhone = phone;
+                registrantOrg = org;
+            }
+            if (roleList.contains("technical")) {
+                techContact = fn.isEmpty() ? org : fn;
+                techEmail = email;
+                techPhone = phone;
+            }
+            if (roleList.contains("administrative")) {
+                adminContact = fn.isEmpty() ? org : fn;
+                adminEmail = email;
+                adminPhone = phone;
+            }
+        }
+        if (!registrar.isEmpty())
+            html += "<tr><td><b>Registrar:</b></td><td>" + val(registrar) + "</td></tr>";
+        if (!registrarOrg.isEmpty())
+            html += "<tr><td><b>Registrar Org:</b></td><td>" + val(registrarOrg) + "</td></tr>";
+        if (!registrarEmail.isEmpty())
+            html += "<tr><td><b>Registrar Email:</b></td><td>" + val(registrarEmail) + "</td></tr>";
+        if (!registrarPhone.isEmpty())
+            html += "<tr><td><b>Registrar Phone:</b></td><td>" + val(registrarPhone) + "</td></tr>";
+        if (!registrarUrl.isEmpty())
+            html += "<tr><td><b>Registrar URL:</b></td><td>" + val(registrarUrl) + "</td></tr>";
+
+        if (!registrant.isEmpty())
+            html += "<tr><td><b>Registrant:</b></td><td>" + val(registrant) + "</td></tr>";
+        if (!registrantOrg.isEmpty())
+            html += "<tr><td><b>Registrant Org:</b></td><td>" + val(registrantOrg) + "</td></tr>";
+        if (!registrantEmail.isEmpty())
+            html += "<tr><td><b>Registrant Email:</b></td><td>" + val(registrantEmail) + "</td></tr>";
+        if (!registrantPhone.isEmpty())
+            html += "<tr><td><b>Registrant Phone:</b></td><td>" + val(registrantPhone) + "</td></tr>";
+
+        if (!techContact.isEmpty())
+            html += "<tr><td><b>Tech Contact:</b></td><td>" + val(techContact) + "</td></tr>";
+        if (!techEmail.isEmpty())
+            html += "<tr><td><b>Tech Email:</b></td><td>" + val(techEmail) + "</td></tr>";
+        if (!techPhone.isEmpty())
+            html += "<tr><td><b>Tech Phone:</b></td><td>" + val(techPhone) + "</td></tr>";
+
+        if (!adminContact.isEmpty())
+            html += "<tr><td><b>Admin Contact:</b></td><td>" + val(adminContact) + "</td></tr>";
+        if (!adminEmail.isEmpty())
+            html += "<tr><td><b>Admin Email:</b></td><td>" + val(adminEmail) + "</td></tr>";
+        if (!adminPhone.isEmpty())
+            html += "<tr><td><b>Admin Phone:</b></td><td>" + val(adminPhone) + "</td></tr>";
+
+        // Nameservers
+        QJsonArray nss = obj.value("nameservers").toArray();
+        if (!nss.isEmpty()) {
+            QStringList nsList;
+            for (const QJsonValue &nsVal : nss) {
+                QJsonObject ns = nsVal.toObject();
+                QString nsName = ns.value("ldhName").toString();
+                if (!nsName.isEmpty())
+                    nsList << val(nsName);
+            }
+            if (!nsList.isEmpty())
+                html += "<tr><td><b>Nameservers:</b></td><td>" + nsList.join("<br>") + "</td></tr>";
+        }
+
+        // DNSSEC
+        QJsonObject secDns = obj.value("secureDNS").toObject();
+        if (!secDns.isEmpty()) {
+            bool ds = secDns.value("delegationSigned").toBool(false);
+            html += "<tr><td><b>DNSSEC:</b></td><td>" + val(ds ? "Yes" : "No") + "</td></tr>";
+        }
+
+        // Notices (with clickable links)
+        QJsonArray notices = obj.value("notices").toArray();
+        if (!notices.isEmpty()) {
+            QStringList noticeList;
+            for (const QJsonValue &nVal : notices) {
+                QJsonObject n = nVal.toObject();
+                QString title = n.value("title").toString();
+                QJsonArray descArr = n.value("description").toArray();
+                QString desc;
+                for (const QJsonValue &d : descArr)
+                    desc += d.toString() + " ";
+                desc = desc.trimmed();
+                QString descWithLinks = makeLinksClickable(desc);
+                if (!title.isEmpty())
+                    noticeList << "<b>" + makeLinksClickable(title) + ":</b> " + "<span style='color:#1c2684; font-size:10pt;'>" + descWithLinks + "</span>";
+                else if (!desc.isEmpty())
+                    noticeList << "<span style='color:#1c2684; font-size:10pt;'>" + descWithLinks + "</span>";
+            }
+            if (!noticeList.isEmpty())
+                html += "<tr><td><b>Notices:</b></td><td>" + noticeList.join("<br>") + "</td></tr>";
+        }
+
+        html += "</table>";
+
+        // If nothing was parsed, fallback to pretty JSON
+        if (html.count("<tr>") < 2) {
+            html = "<pre>" + QString::fromUtf8(doc.toJson(QJsonDocument::Indented)).toHtmlEscaped() + "</pre>";
+        }
+
+        output->setHtml(html);
+        output->setToolTip(QString("RDAP server: %1").arg(rdapServer));
+    });
+
+    dlg.adjustSize();
+    dlg.exec();
+}
+
+
+void showLanSharesDialog(QWidget *parent) {
+    QPointer<QDialog> dlg = new QDialog(parent);
+    dlg->setWindowTitle("LAN Shares Browser");
+    dlg->setMinimumWidth(700);
+    addCtrlWClose(dlg);
+
+    QVBoxLayout *layout = new QVBoxLayout(dlg);
+
+    QLabel *title = new QLabel(
+        "<b>LAN Shares Browser</b><br>"
+        "<span style='color:gray;'>Scan your network for computers and shared folders.<br>"
+        "Expand a computer to see its shares. Click a share to copy its UNC path.</span>");
+    title->setTextFormat(Qt::RichText);
+    layout->addWidget(title);
+
+    QGroupBox *rangeBox = new QGroupBox("Scan Range / Target");
+    QHBoxLayout *rangeLayout = new QHBoxLayout(rangeBox);
+    QLabel *fromLabel = new QLabel("From IP/Name:");
+    QLineEdit *fromEdit = new QLineEdit;
+    QLabel *toLabel = new QLabel("To IP:");
+    QLineEdit *toEdit = new QLineEdit;
+    QPushButton *scanBtn = new QPushButton("Scan");
+    QPushButton *stopBtn = new QPushButton("Stop");
+    stopBtn->setEnabled(false);
+    rangeLayout->addWidget(fromLabel);
+    rangeLayout->addWidget(fromEdit);
+    rangeLayout->addWidget(toLabel);
+    rangeLayout->addWidget(toEdit);
+    rangeLayout->addWidget(scanBtn);
+    rangeLayout->addWidget(stopBtn);
+    layout->addWidget(rangeBox);
+
+    // Autofill with local subnet, default .1 to .254
+    QString defaultBase = "192.168.1";
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol &&
+                !entry.ip().isLoopback() &&
+                !entry.ip().toString().startsWith("169.254.")) {
+                QString ip = entry.ip().toString();
+                QStringList parts = ip.split('.');
+                if (parts.size() == 4)
+                    defaultBase = QString("%1.%2.%3").arg(parts[0]).arg(parts[1]).arg(parts[2]);
+                break;
+            }
+        }
+    }
+    fromEdit->setText(defaultBase + ".1");
+    toEdit->setText(defaultBase + ".254");
+
+    QPointer<QTreeWidget> tree = new QTreeWidget;
+    tree->setHeaderLabels(QStringList() << "Computer / Share" << "Type" << "Comment");
+    tree->setColumnWidth(0, 220);
+    tree->setColumnWidth(1, 60);
+    tree->setColumnWidth(2, 200);
+    tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    tree->setExpandsOnDoubleClick(true);
+    tree->setRootIsDecorated(true);
+    layout->addWidget(tree, 1);
+
+    // Progress bar and time label on same row, time right-aligned
+    QHBoxLayout *progressLayout = new QHBoxLayout();
+    QPointer<QProgressBar> progress = new QProgressBar;
+    progress->setMinimum(0);
+    progress->setMaximum(100);
+    progress->setValue(0);
+    progress->setTextVisible(true);
+    progressLayout->addWidget(progress, 1);
+
+    QLabel *timeLabel = new QLabel("Time: 00:00 Min.");
+    timeLabel->setStyleSheet("color:#1c2684; font-weight:bold; margin-left:12px;");
+    progressLayout->addWidget(timeLabel, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(progressLayout);
+
+    // Expand/Collapse/Close buttons centered
+    QHBoxLayout *expColLayout = new QHBoxLayout();
+    expColLayout->addStretch();
+    QPushButton *expandAllBtn = new QPushButton("Expand all");
+    QPushButton *collapseAllBtn = new QPushButton("Collapse all");
+    QPushButton *closeBtn = new QPushButton("Close");
+    expColLayout->addWidget(expandAllBtn);
+    expColLayout->addWidget(collapseAllBtn);
+    expColLayout->addWidget(closeBtn);
+    expColLayout->addStretch();
+    layout->addLayout(expColLayout);
+
+    QObject::connect(expandAllBtn, &QPushButton::clicked, tree, &QTreeWidget::expandAll);
+    QObject::connect(collapseAllBtn, &QPushButton::clicked, tree, &QTreeWidget::collapseAll);
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+
+    QObject::connect(tree, &QTreeWidget::itemDoubleClicked, [dlg](QTreeWidgetItem *item, int col) {
+        if (item->parent()) {
+            QString unc = QString("\\\\%1\\%2").arg(item->parent()->text(0), item->text(0));
+            QApplication::clipboard()->setText(unc);
+            QMessageBox::information(dlg, "UNC Path Copied", QString("Copied to clipboard:\n%1").arg(unc));
+        }
+    });
+
+    QThreadPool *pool = new QThreadPool(dlg);
+    pool->setMaxThreadCount(16);
+
+    auto enableControls = [=](bool enabled) {
+        fromEdit->setEnabled(enabled);
+        toEdit->setEnabled(enabled);
+        scanBtn->setEnabled(enabled);
+        stopBtn->setEnabled(!enabled);
+    };
+
+    auto scanRunning = std::make_shared<bool>(false);
+    auto cancelRequested = std::make_shared<bool>(false);
+
+    QObject::connect(scanBtn, &QPushButton::clicked, [=]() {
+        if (!tree || !progress || !dlg) return;
+        tree->clear();
+        progress->setValue(0);
+        timeLabel->setText("Time: 00:00 Min.");
+
+        QString from = fromEdit->text().trimmed();
+        QString to = toEdit->text().trimmed();
+
+        QList<QString> targets;
+        if (to.isEmpty()) {
+            if (!from.isEmpty())
+                targets << from;
+        } else {
+            QHostAddress fromAddr(from), toAddr(to);
+            if (fromAddr.protocol() == QAbstractSocket::IPv4Protocol &&
+                toAddr.protocol() == QAbstractSocket::IPv4Protocol) {
+                quint32 fromInt = fromAddr.toIPv4Address();
+                quint32 toInt = toAddr.toIPv4Address();
+                if (fromInt > toInt) std::swap(fromInt, toInt);
+                for (quint32 ip = fromInt; ip <= toInt; ++ip)
+                    targets << QHostAddress(ip).toString();
+            } else {
+                QMessageBox::warning(dlg, "Input Error", "Invalid IP address range.");
+                return;
+            }
+        }
+
+        if (targets.isEmpty()) {
+            QMessageBox::warning(dlg, "Input Error", "No targets to scan.");
+            return;
+        }
+
+        // We'll increment progress for each ping and each share scan
+        int totalSteps = targets.size(); // ping phase
+        // We'll add aliveHosts->size() after ping phase
+
+        progress->setMaximum(totalSteps); // will be increased after ping phase
+        progress->setValue(0);
+
+        *scanRunning = true;
+        *cancelRequested = false;
+        enableControls(false);
+
+        QElapsedTimer *timer = new QElapsedTimer();
+        timer->start();
+
+        QTimer *uiTimer = new QTimer(dlg);
+        uiTimer->setInterval(100); // Update every 0.1s for responsiveness
+        auto progressValue = std::make_shared<int>(0);
+        timeLabel->setText("Time: 00:00 Min.");
+        QObject::connect(uiTimer, &QTimer::timeout, [=]() {
+            qint64 elapsed = timer->elapsed() / 1000;
+            int min = int(elapsed / 60);
+            int sec = int(elapsed % 60);
+            timeLabel->setText(QString("Time: %1:%2 Min.").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0')));
+        });
+        uiTimer->start();
+
+        // Step 1: Ping all targets in parallel, collect alive hosts
+        auto aliveHosts = std::make_shared<QVector<QString>>();
+        QMutex *aliveMutex = new QMutex;
+        auto pingCompleted = std::make_shared<int>(0);
+
+        for (int i = 0; i < targets.size(); ++i) {
+            QFuture<void> unused = QtConcurrent::run(pool, [=]() {
+                if (*cancelRequested || !dlg) return;
+                QString ip = targets[i];
+                QProcess ping;
+                ping.start("ping", QStringList() << "-n" << "1" << "-w" << "200" << ip);
+                ping.waitForFinished(400);
+                QString result = ping.readAllStandardOutput();
+                bool alive = result.contains("TTL=");
+                if (alive) {
+                    QMutexLocker locker(aliveMutex);
+                    aliveHosts->append(ip);
+                }
+                QMetaObject::invokeMethod(progress, [=]() {
+                    if (!*scanRunning || !dlg) return;
+                    (*progressValue)++;
+                    progress->setValue(*progressValue);
+                }, Qt::QueuedConnection);
+
+                bool last = false;
+                {
+                    QMutexLocker locker(aliveMutex);
+                    ++(*pingCompleted);
+                    last = (*pingCompleted == targets.size());
+                }
+                if (last) {
+                    // Step 2: For each alive host, scan shares (in parallel)
+                    int shareSteps = aliveHosts->size();
+                    QMetaObject::invokeMethod(progress, [=]() {
+                        progress->setMaximum(totalSteps + shareSteps);
+                    }, Qt::QueuedConnection);
+
+                    if (!*scanRunning || !dlg) return;
+                    auto completed = std::make_shared<int>(0);
+                    auto foundHosts = std::make_shared<int>(0);
+
+                    QSet<QString> *seenHosts = new QSet<QString>();
+                    QMutex *resultsMutex = new QMutex;
+
+                    for (int j = 0; j < aliveHosts->size(); ++j) {
+                        QFuture<void> unused2 = QtConcurrent::run(pool, [=]() {
+                            if (*cancelRequested || !dlg) return;
+                            QString ip = (*aliveHosts)[j];
+                            QList<QList<QString>> shares;
+                            try {
+                                shares = getSharesOnHost(ip);
+                            } catch (...) {}
+
+                            // Only show hosts with shares
+                            if (!shares.isEmpty()) {
+                                QString netbios = QHostInfo::fromName(ip).hostName();
+                                QString hostLabel = netbios.isEmpty() || netbios == ip ? ip : (netbios + " " + ip);
+
+                                bool isDuplicate = false;
+                                {
+                                    QMutexLocker locker(resultsMutex);
+                                    if (seenHosts->contains(hostLabel)) {
+                                        isDuplicate = true;
+                                    } else {
+                                        seenHosts->insert(hostLabel);
+                                    }
+                                }
+                                if (!isDuplicate) {
+                                    QMetaObject::invokeMethod(tree, [=]() {
+                                        if (!*scanRunning || !dlg) return;
+                                        QTreeWidgetItem *hostItem = new QTreeWidgetItem(tree, QStringList() << hostLabel);
+                                        QFont boldFont = hostItem->font(0);
+                                        boldFont.setBold(true);
+                                        hostItem->setFont(0, boldFont);
+                                        hostItem->setForeground(0, Qt::black);
+
+                                        hostItem->setExpanded(false);
+
+                                        for (const QList<QString> &share : shares) {
+                                            QTreeWidgetItem *shareItem = new QTreeWidgetItem(hostItem, QStringList() << share[0] << share[1] << share[2]);
+                                            QBrush blueBrush(QColor("#1c2684"));
+                                            shareItem->setForeground(0, blueBrush);
+                                            shareItem->setForeground(1, blueBrush);
+                                            shareItem->setForeground(2, blueBrush);
+                                            shareItem->setToolTip(0, QString("\\\\%1\\%2").arg(ip, share[0]));
+                                        }
+                                    }, Qt::QueuedConnection);
+                                    (*foundHosts)++;
+                                }
+                            }
+
+                            QMetaObject::invokeMethod(progress, [=]() {
+                                if (!*scanRunning || !dlg) return;
+                                (*progressValue)++;
+                                progress->setValue(*progressValue);
+                            }, Qt::QueuedConnection);
+
+                            bool lastShare = false;
+                            {
+                                QMutexLocker locker(resultsMutex);
+                                ++(*completed);
+                                lastShare = (*completed == aliveHosts->size());
+                            }
+                            if (lastShare) {
+                                QMetaObject::invokeMethod(dlg, [=]() {
+                                    if (!dlg) return;
+                                    *scanRunning = false;
+                                    enableControls(true);
+                                    progress->setValue(progress->maximum());
+                                    uiTimer->stop();
+                                    qint64 elapsed = timer->elapsed() / 1000;
+                                    int min = int(elapsed / 60);
+                                    int sec = int(elapsed % 60);
+                                    timeLabel->setText(QString("Time: %1:%2 Min.").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0')));
+                                    if (*foundHosts == 0) {
+                                        QMessageBox::information(dlg, "No Shares Found", "No shares found in the specified range.");
+                                    }
+                                    delete seenHosts;
+                                    delete resultsMutex;
+                                    delete timer;
+                                    delete aliveMutex;
+                                    uiTimer->deleteLater();
+                                }, Qt::QueuedConnection);
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+
+    QObject::connect(stopBtn, &QPushButton::clicked, [=]() {
+        *cancelRequested = true;
+        *scanRunning = false;
+        enableControls(true);
+    });
+
+    QObject::connect(dlg, &QDialog::finished, [=]() {
+        *cancelRequested = true;
+        *scanRunning = false;
+        pool->clear();
+        pool->waitForDone();
+        if (dlg) dlg->deleteLater();
+    });
+
+    dlg->adjustSize();
+    dlg->exec();
+
+    *cancelRequested = true;
+    *scanRunning = false;
+    pool->clear();
+    pool->waitForDone();
+    delete pool;
+}
+
+
 // Main function
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -3956,6 +4700,7 @@ QAction *dnsCacheAction      = netToolsMenu->addAction("DNS Cache Viewer");
 QAction *hostsFileAction     = netToolsMenu->addAction("Hosts File Editor");
 QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check");
 QAction *netscanAction       = netToolsMenu->addAction("IP Scanner");
+QAction *lanSharesAction     = netToolsMenu->addAction("LAN Shares");
 QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery");
 QAction *netstatStatsAction  = netToolsMenu->addAction("Netstat Statistics");
 QAction *adaptersAction      = netToolsMenu->addAction("Network Adapters");
@@ -3963,8 +4708,9 @@ QAction *netUsageAction      = netToolsMenu->addAction("Network Usage");
 QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup");
 QAction *pingAction          = netToolsMenu->addAction("Ping");
 QAction *portscanAction      = netToolsMenu->addAction("Port Scan");
-QAction *routeTableAction   = netToolsMenu->addAction("Route Table Viewer/Editor");
+QAction *routeTableAction    = netToolsMenu->addAction("Route Table Viewer/Editor");
 QAction *tracertAction       = netToolsMenu->addAction("Traceroute");
+QAction *whoisLookupAction   = netToolsMenu->addAction("Whois (RDAP) Lookup");
 QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan");
 
 
@@ -4000,6 +4746,14 @@ auto deleteTempFiles = [&window]() {
     }
 };
 
+QObject::connect(lanSharesAction, &QAction::triggered, [&window]() {
+    showLanSharesDialog(&window);
+});
+
+
+QObject::connect(whoisLookupAction, &QAction::triggered, [&window]() {
+    showWhoisLookupDialog(&window);
+});
 
 QObject::connect(dnsCacheAction, &QAction::triggered, [&window]() {
     showDnsCacheDialog(&window);

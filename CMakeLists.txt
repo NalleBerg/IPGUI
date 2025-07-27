@@ -22,6 +22,9 @@ set(CMAKE_AUTORCC ON)
 
 target_link_libraries(IPGui PRIVATE iphlpapi ws2_32)
 
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Concurrent)
+target_link_libraries(IPGui PRIVATE Qt6::Core Qt6::Widgets Qt6::Network Qt6::Concurrent)
+
 # find_package(SQLite3 REQUIRED)
 # include_directories(${SQLite3_INCLUDE_DIRS})
 # target_link_libraries(IPGui PRIVATE SQLite3::SQLite3)
