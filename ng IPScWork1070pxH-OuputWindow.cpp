@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.8.5
+// Project version: 3.8.0
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -116,7 +116,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.8.5";
+const QString VersionNumber = "3.8.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Declaring functions for port scanner dialog
@@ -375,14 +375,11 @@ void showNetworkScannerDialog(QWidget *parent) {
     deviceTable->verticalHeader()->setVisible(false);
     deviceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     deviceTable->setSelectionMode(QAbstractItemView::NoSelection);
-
-    // --- Only add scrollbars, do not change any sizes ---
-    deviceTable->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    deviceTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    // ----------------------------------------------------
-
-    deviceTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    deviceTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    deviceTable->setMinimumHeight(600);
+    deviceTable->setMaximumHeight(600);
     deviceTable->setContentsMargins(0, 0, 0, 0);
+    deviceTable->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     layout->addWidget(deviceTable);
 
     deviceTable->setItemDelegateForColumn(0, new LinkDelegate(deviceTable));
@@ -561,16 +558,6 @@ void showNetworkScannerDialog(QWidget *parent) {
                                 showLanSharesDialog(parent, dev.ip);
                             });
                         }
-                        // --- Add an empty row for air at the bottom ---
-                        int emptyRow = deviceTable->rowCount();
-                        deviceTable->insertRow(emptyRow);
-                        for (int col = 0; col < deviceTable->columnCount(); ++col) {
-                            QTableWidgetItem *emptyItem = new QTableWidgetItem("");
-                            emptyItem->setFlags(emptyItem->flags() & ~Qt::ItemIsEditable);
-                            deviceTable->setItem(emptyRow, col, emptyItem);
-                        }
-                        deviceTable->setRowHeight(emptyRow, 24); // Adjust height for more/less air
-                        // -------------------------------------------------
                     }, Qt::QueuedConnection);
 
                     QMetaObject::invokeMethod(foundLabel, "setText", Qt::QueuedConnection,
@@ -583,8 +570,6 @@ void showNetworkScannerDialog(QWidget *parent) {
                         *scanRunning = false;
                         scanBtn->setEnabled(true);
                         updateStopCloseBtn();
-                        // --- Ensure progress bar is 100% at the end ---
-                        progress->setValue(progress->maximum());
                     }
                 }, Qt::QueuedConnection);
             });
@@ -598,8 +583,6 @@ void showNetworkScannerDialog(QWidget *parent) {
             *scanRunning = false;
             scanBtn->setEnabled(true);
             updateStopCloseBtn();
-            // Also force progress bar to 100% if stopped
-            progress->setValue(progress->maximum());
         } else {
             dlg->accept();
         }
