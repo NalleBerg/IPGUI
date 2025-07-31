@@ -2,7 +2,7 @@
 // Project author: Nalle Berg
 // Project name: IPGui
 // Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.8.5
+// Project version: 3.8.7
 // Compiler: MSVC 19.29.30133.0
 // Target platform: Windows
 // Target architecture: x64
@@ -93,6 +93,7 @@
 #include <QStyledItemDelegate>
 #include <QMouseEvent>
 #include <QPainter> // Required for QStyledItemDelegate paint()
+#include <QDebug>
 
 
 
@@ -116,7 +117,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.8.5";
+const QString VersionNumber = "3.8.7";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Declaring functions for port scanner dialog
@@ -840,8 +841,6 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
     });
 
     static QMap<QPair<int, QString>, PortInfo> portInfoMap;
-    QTimer *timer = new QTimer(dlg);
-    timer->setSingleShot(true);
 
     QObject::connect(scanBtn, &QPushButton::clicked, [=]() mutable {
         QString target = targetEdit->text().trimmed();
@@ -874,79 +873,81 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
         currentPortEdit->clear();
 
         int totalCount = endPort - startPort + 1;
-        auto checkedCount = std::make_shared<int>(0);
-        auto openCount = std::make_shared<int>(0);
+        auto checkedCount = std::make_shared<QAtomicInt>(0);
+        auto openCount = std::make_shared<QAtomicInt>(0);
         auto startTime = std::make_shared<QElapsedTimer>();
         startTime->start();
-        auto nextPort = std::make_shared<int>(startPort);
 
-        QObject::disconnect(timer, nullptr, nullptr, nullptr);
+        int maxThreads = 32; // Tune as needed
+        QThreadPool *pool = QThreadPool::globalInstance();
+        pool->setMaxThreadCount(maxThreads);
 
-        std::function<void()> scanNextPort;
-        scanNextPort = [=]() mutable {
-            if (!*scanRunning || *nextPort > endPort) {
-                scanBtn->setEnabled(true);
-                *scanRunning = false;
-                updateStopCloseText();
-                progressLabel->setText("100 % done");
-                etaLabel->setText("Estimated time remaining: 0 minutes and 0 seconds");
-                currentPortEdit->clear();
-                output->append(QString("<br><b>Scan complete. %1 open port%2 found.</b>")
-                    .arg(*openCount)
-                    .arg(*openCount == 1 ? "" : "s"));
-                QObject::disconnect(timer, nullptr, nullptr, nullptr);
-                return;
-            }
-            int port = *nextPort;
-            (*nextPort)++;
-            currentPortEdit->setText(QString::number(port));
-            QTcpSocket *sock = new QTcpSocket(dlg);
-            sock->connectToHost(target, port);
-            QTimer::singleShot(200, sock, [=]() {
-                bool connected = (sock->state() == QAbstractSocket::ConnectedState);
+        auto scanRunningPtr = scanRunning; // for lambda capture
+
+        for (int port = startPort; port <= endPort; ++port) {
+            pool->start([=]() {
+                if (!*scanRunningPtr) return;
+                QTcpSocket sock;
+                sock.connectToHost(target, port);
+                bool connected = sock.waitForConnected(200);
                 if (connected) {
-                    (*openCount)++;
+                    openCount->fetchAndAddRelaxed(1);
                     PortInfo info = portInfoMap.value(qMakePair(port, QString("tcp")));
                     QString service = info.serviceName.isEmpty() ? "Unknown" : info.serviceName;
                     QString desc = info.description.isEmpty() ? "No description" : info.description;
-                    output->append(
-                        QString("<span style='color:blue; font-weight:bold;'>%1</span> "
-                                "<span style='color:limegreen; font-weight:bold;'>OPEN &#x1F389;</span> "
-                                "<span style='color:gray;'>&nbsp;%2</span> "
-                                "<span style='color:#888;'>&nbsp;%3</span>")
-                        .arg(port)
-                        .arg(service.toHtmlEscaped())
-                        .arg(desc.toHtmlEscaped())
-                    );
+                    QMetaObject::invokeMethod(output, [=]() {
+                        output->append(
+                            QString("<span style='color:blue; font-weight:bold;'>%1</span> "
+                                    "<span style='color:limegreen; font-weight:bold;'>OPEN &#x1F389;</span> "
+                                    "<span style='color:gray;'>&nbsp;%2</span> "
+                                    "<span style='color:#888;'>&nbsp;%3</span>")
+                            .arg(port)
+                            .arg(service.toHtmlEscaped())
+                            .arg(desc.toHtmlEscaped())
+                        );
+                    }, Qt::QueuedConnection);
                 }
-                (*checkedCount)++;
-                int percent = int((double(*checkedCount) * 100.0) / totalCount);
-                progressLabel->setText(QString("%1 % done").arg(percent));
+                int done = checkedCount->fetchAndAddRelaxed(1) + 1;
+                int percent = int((double(done) * 100.0) / totalCount);
+                QMetaObject::invokeMethod(progressLabel, "setText", Qt::QueuedConnection,
+                    Q_ARG(QString, QString("%1 % done").arg(percent)));
+                QMetaObject::invokeMethod(currentPortEdit, "setText", Qt::QueuedConnection,
+                    Q_ARG(QString, QString::number(port)));
                 qint64 elapsedMs = startTime->elapsed();
-                if (*checkedCount > 0 && percent < 100) {
-                    double avgMsPerPort = double(elapsedMs) / *checkedCount;
-                    int portsLeft = totalCount - *checkedCount;
+                if (done > 0 && percent < 100) {
+                    double avgMsPerPort = double(elapsedMs) / done;
+                    int portsLeft = totalCount - done;
                     int msLeft = int(avgMsPerPort * portsLeft);
                     int secLeft = msLeft / 1000;
                     int minLeft = secLeft / 60;
                     secLeft = secLeft % 60;
-                    etaLabel->setText(QString("Estimated time remaining: %1 minute%2 and %3 second%4")
-                        .arg(minLeft)
-                        .arg(minLeft == 1 ? "" : "s")
-                        .arg(secLeft)
-                        .arg(secLeft == 1 ? "" : "s"));
+                    QMetaObject::invokeMethod(etaLabel, "setText", Qt::QueuedConnection,
+                        Q_ARG(QString, QString("Estimated time remaining: %1 minute%2 and %3 second%4")
+                            .arg(minLeft)
+                            .arg(minLeft == 1 ? "" : "s")
+                            .arg(secLeft)
+                            .arg(secLeft == 1 ? "" : "s")));
                 } else if (percent >= 100) {
-                    etaLabel->setText("Estimated time remaining: 0 minutes and 0 seconds");
+                    QMetaObject::invokeMethod(etaLabel, "setText", Qt::QueuedConnection,
+                        Q_ARG(QString, "Estimated time remaining: 0 minutes and 0 seconds"));
                 }
-                sock->abort();
-                sock->deleteLater();
-                if (*scanRunning)
-                    timer->start(1);
+                if (done == totalCount) {
+                    QMetaObject::invokeMethod(scanBtn, "setEnabled", Qt::QueuedConnection, Q_ARG(bool, true));
+                    *scanRunningPtr = false;
+                    QMetaObject::invokeMethod(currentPortEdit, "clear", Qt::QueuedConnection);
+                    QMetaObject::invokeMethod(progressLabel, "setText", Qt::QueuedConnection,
+                        Q_ARG(QString, "100 % done"));
+                    QMetaObject::invokeMethod(output, [=]() {
+                        output->append(QString("<br><b>Scan complete. %1 open port%2 found.</b>")
+                            .arg(openCount->loadRelaxed())
+                            .arg(openCount->loadRelaxed() == 1 ? "" : "s"));
+                    }, Qt::QueuedConnection);
+                    QMetaObject::invokeMethod(dlg, [=]() {
+                        updateStopCloseText();
+                    }, Qt::QueuedConnection);
+                }
             });
-        };
-
-        QObject::connect(timer, &QTimer::timeout, scanNextPort);
-        scanNextPort();
+        }
     });
 
     QObject::connect(stopCloseBtn, &QPushButton::clicked, [=, &updateStopCloseText]() mutable {
@@ -958,7 +959,6 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
             output->append("<b>Scan stopped.</b>");
             currentPortEdit->clear();
             updateStopCloseText();
-            QObject::disconnect(timer, nullptr, nullptr, nullptr);
             return;
         }
         dlg->close();
@@ -971,201 +971,599 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
 
 
 void showTracerouteDialog(QWidget *parent) {
+    // DPI-AWARE TRACEROUTE DIALOG - Full functionality with correct sizing
     QDialog dlg(parent);
     dlg.setWindowTitle("Traceroute Host");
-    // Remove the Close (X) button from the window frame
-    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling - further increased for better fit
+    int physicalWidth = static_cast<int>(1400 / dpiRatio);
+    int physicalHeight = static_cast<int>(850 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
+    QLabel *prompt = new QLabel("Enter host or IP to trace:", &dlg);
+    prompt->setGeometry(10, 10, physicalWidth-20, 25);
+    prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
 
-    QVBoxLayout *layout = new QVBoxLayout(&dlg);
-
-    QLabel *prompt = new QLabel("Enter host or IP to trace:");
-    layout->addWidget(prompt);
-
-    QLineEdit *input = new QLineEdit;
+    QLineEdit *input = new QLineEdit(&dlg);
     input->setPlaceholderText("e.g. 8.8.8.8 or www.google.com");
-    layout->addWidget(input);
+    input->setGeometry(10, 40, physicalWidth-20, 25);
+    input->setStyleSheet("QLineEdit { border: 2px solid #3498db; border-radius: 4px; padding: 2px; }");
 
-    QHBoxLayout *hopsLayout = new QHBoxLayout();
-    QLabel *hopsLabel = new QLabel("Max hops:");
-    QSpinBox *hopsSpin = new QSpinBox;
+    QLabel *hopsLabel = new QLabel("Max hops:", &dlg);
+    hopsLabel->setGeometry(10, 75, 80, 25);
+    hopsLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; }");
+    
+    QSpinBox *hopsSpin = new QSpinBox(&dlg);
     hopsSpin->setToolTip("Maximum number of hops to trace. Default is 30.");
     hopsSpin->setRange(1, 64);
     hopsSpin->setValue(30);
-    hopsLayout->addWidget(hopsLabel);
-    hopsLayout->addWidget(hopsSpin);
-    layout->addLayout(hopsLayout);
+    hopsSpin->setGeometry(100, 75, 80, 25);
+    hopsSpin->setStyleSheet("QSpinBox { border: 1px solid #bdc3c7; border-radius: 3px; }");
 
-    QTextEdit *output = new QTextEdit;
-    output->setReadOnly(true);
-    output->setLineWrapMode(QTextEdit::NoWrap);
-    output->setMinimumHeight(80);
-    layout->addWidget(output);
+    // Create colorful table with DPI-corrected size
+    QTableWidget *table = new QTableWidget(&dlg);
+    table->setColumnCount(6);
+    QStringList headers = {"Hop", "IP/Host", "RTT 1", "RTT 2", "RTT 3", "Comments"};
+    table->setHorizontalHeaderLabels(headers);
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false); // Hide row numbers since we have hop numbers
+    
+    // Position table with proper DPI-corrected dimensions - make it 80px smaller in height
+    int tableWidth = physicalWidth - 20;
+    int tableHeight = physicalHeight - 200; // Reduced by 80px from 120 to clear buttons
+    table->setGeometry(10, 110, tableWidth, tableHeight);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn); // Always show vertical scrollbar
+    
+    // Colorful table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 4px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 5px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    
+    QFont headerFont = table->horizontalHeader()->font();
+    headerFont.setBold(true);
+    table->horizontalHeader()->setFont(headerFont);
 
-    QHBoxLayout *btnLayout = new QHBoxLayout();
-    QPushButton *traceBtn = new QPushButton("Start");
+    // Set column widths proportional to table width - fixed distribution for proper visibility
+    int colWidths[] = {50, 250, 70, 70, 70, tableWidth-510}; // Total: tableWidth
+    for (int i = 0; i < 6; i++) {
+        table->setColumnWidth(i, colWidths[i]);
+    }
+
+    // Colorful buttons positioned with minimal gap from table
+    int buttonY = physicalHeight - 45; // Position buttons with minimal gap
+    QPushButton *traceBtn = new QPushButton("Start", &dlg);
     traceBtn->setToolTip("Start the traceroute to the specified host.");
-    QPushButton *stopCloseBtn = new QPushButton("Close");
+    traceBtn->setGeometry(10, buttonY, 80, 35);
+    traceBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
+    QPushButton *stopCloseBtn = new QPushButton("Close", &dlg);
     stopCloseBtn->setToolTip("Stop the traceroute or close the dialog.");
-    QPushButton *bottomBtn = new QPushButton("Bottom");
+    stopCloseBtn->setGeometry(100, buttonY, 80, 35);
+    stopCloseBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
+    );
+    
+    QPushButton *bottomBtn = new QPushButton("Bottom", &dlg);
     bottomBtn->setToolTip("Scroll to the bottom of the output.");
-    btnLayout->addWidget(traceBtn);
-    btnLayout->addWidget(stopCloseBtn);
-    btnLayout->addWidget(bottomBtn);
-    layout->addLayout(btnLayout);
+    bottomBtn->setGeometry(190, buttonY, 80, 35);
+    bottomBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    
+    QPushButton *copyBtn = new QPushButton("Copy All", &dlg);
+    copyBtn->setToolTip("Copy all traceroute results to clipboard in CSV format.");
+    copyBtn->setGeometry(280, buttonY, 80, 35);
+    copyBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
 
-    // State
+    // Animated status indicator with colors - smaller and better positioned
+    QLabel *scanningLabel = new QLabel(&dlg);
+    scanningLabel->setAlignment(Qt::AlignCenter);
+    scanningLabel->setStyleSheet(
+        "QLabel { "
+        "    color: #e67e22; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "    background-color: #fdf2e9; "
+        "    border: 2px solid #f39c12; "
+        "    border-radius: 6px; "
+        "    padding: 4px; "
+        "}"
+    );
+    scanningLabel->setVisible(false);
+    scanningLabel->setGeometry(370, buttonY, 300, 25); // Position after copy button
+
+    // Timer for animated scanning dots
+    QTimer *animTimer = new QTimer(&dlg);
+    int dotCount = 0;
+    
+    QObject::connect(animTimer, &QTimer::timeout, [scanningLabel, &dotCount]() mutable {
+        QStringList spinChars = {"\\", "|", "/", "-"};
+        QString spinner = spinChars[dotCount % 4];
+        scanningLabel->setText(QString("🔍 Tracing route %1").arg(spinner));
+        dotCount++;
+    });
+    animTimer->setInterval(250); // Update every 250ms
+
+    // State variables
     bool isTracing = false;
-    QPointer<QProcess> lastProc = nullptr;
-    QPointer<QDialog> scanningDlg = nullptr;
+    QProcess *lastProc = nullptr;
 
-    // Helper to update Stop/Close button text
+    // Helper to update Stop/Close button text and colors
     auto updateStopCloseText = [&]() {
         if (isTracing) {
             stopCloseBtn->setText("Stop");
             stopCloseBtn->setToolTip("Stop the traceroute");
+            stopCloseBtn->setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            scanningLabel->setVisible(true);
+            animTimer->start();
         } else {
             stopCloseBtn->setText("Close");
             stopCloseBtn->setToolTip("Close the dialog");
+            stopCloseBtn->setStyleSheet(
+                "QPushButton { background-color: #95a5a6; color: white; border: none; border-radius: 5px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #7f8c8d; } "
+                "QPushButton:pressed { background-color: #6c7b7d; }"
+            );
+            scanningLabel->setVisible(false);
+            animTimer->stop();
+        }
+    };
+    updateStopCloseText();
+
+    // Ctrl+W shortcut: only close if not tracing
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, [&dlg, &isTracing]() mutable {
+        if (!isTracing) dlg.close();
+    });
+
+    // Sorting state
+    int sortColumn = 0;
+    Qt::SortOrder sortOrder = Qt::AscendingOrder;
+
+    auto updateHeaderArrows = [&]() {
+        for (int i = 0; i < headers.size(); ++i) {
+            QString label = headers[i];
+            if (i == sortColumn)
+                label += (sortOrder == Qt::AscendingOrder ? " ▲" : " ▼");
+            table->horizontalHeaderItem(i)->setText(label);
         }
     };
 
-    // --- Ctrl+W shortcut: only close if not tracing ---
-    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
-    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    QObject::connect(closeShortcut, &QShortcut::activated, [&]() {
-        if (!isTracing) dlg.accept();
-    });
+    struct HopEntry {
+        int hop = 0;
+        QString ipHost, rtt1, rtt2, rtt3, comment;
+    };
+    QList<HopEntry> hops;
 
+    // Helper to apply row colors based on hop data
+    auto applyRowColors = [&](int row, const HopEntry &e) {
+        QColor rowColor;
+        if (e.ipHost == "*" || e.comment.contains("timed out")) {
+            rowColor = QColor("#ffebee"); // Light red for timeouts
+        } else if (e.ipHost.startsWith("192.168.") || e.ipHost.startsWith("10.") || e.ipHost.startsWith("172.")) {
+            rowColor = QColor("#e8f5e8"); // Light green for private IPs
+        } else {
+            rowColor = QColor("#f0f8ff"); // Light blue for public IPs
+        }
+        
+        for (int col = 0; col < 6; col++) {
+            if (table->item(row, col)) {
+                table->item(row, col)->setBackground(rowColor);
+                
+                // Special text colors for different columns
+                if (col == 0) { // Hop number
+                    table->item(row, col)->setForeground(QColor("#2c3e50"));
+                } else if (col == 1) { // IP/Host
+                    table->item(row, col)->setForeground(QColor("#27ae60"));
+                } else if (col >= 2 && col <= 4) { // RTT columns
+                    table->item(row, col)->setForeground(QColor("#e67e22"));
+                } else { // Comments
+                    table->item(row, col)->setForeground(QColor("#8e44ad"));
+                }
+            }
+        }
+    };
+
+    auto fillTable = [&]() {
+        table->setRowCount(0);
+        
+        // Remove duplicates by hop number (keep the latest entry for each hop)
+        QMap<int, HopEntry> uniqueHops;
+        for (const HopEntry &e : hops) {
+            if (e.hop > 0) { // Only valid hop numbers
+                uniqueHops[e.hop] = e;
+            }
+        }
+        
+        // Convert back to sorted list
+        QList<HopEntry> sortedHops = uniqueHops.values();
+        std::sort(sortedHops.begin(), sortedHops.end(), [](const HopEntry &a, const HopEntry &b) {
+            return a.hop < b.hop;
+        });
+        
+        for (const HopEntry &e : sortedHops) {
+            int row = table->rowCount();
+            table->insertRow(row);
+            
+            QTableWidgetItem *hopItem = new QTableWidgetItem(QString::number(e.hop));
+            QTableWidgetItem *ipHostItem = new QTableWidgetItem(e.ipHost);
+            QTableWidgetItem *rtt1Item = new QTableWidgetItem(e.rtt1);
+            QTableWidgetItem *rtt2Item = new QTableWidgetItem(e.rtt2);
+            QTableWidgetItem *rtt3Item = new QTableWidgetItem(e.rtt3);
+            QTableWidgetItem *commentItem = new QTableWidgetItem(e.comment);
+            
+            // Right-align numeric columns
+            hopItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            rtt1Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            rtt2Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            rtt3Item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            
+            // Set tooltips for full text
+            if (!e.ipHost.isEmpty()) ipHostItem->setToolTip(e.ipHost);
+            if (!e.comment.isEmpty()) commentItem->setToolTip(e.comment);
+            
+            table->setItem(row, 0, hopItem);
+            table->setItem(row, 1, ipHostItem);
+            table->setItem(row, 2, rtt1Item);
+            table->setItem(row, 3, rtt2Item);
+            table->setItem(row, 4, rtt3Item);
+            table->setItem(row, 5, commentItem);
+            
+            applyRowColors(row, e);
+        }
+        updateHeaderArrows();
+        if (table->rowCount() > 0)
+            table->scrollToBottom();
+    };
+
+    // Connect buttons
     QObject::connect(traceBtn, &QPushButton::clicked, [&]() {
-        QString host = input->text().trimmed();
-        int hops = hopsSpin->value();
-        if (host.isEmpty()) {
-            output->setPlainText("Please enter a host or IP address.");
+        QString target = input->text().trimmed();
+        if (target.isEmpty()) {
+            input->setFocus();
+            input->setPlaceholderText("Please enter a host or IP address!");
             return;
         }
-        traceBtn->setEnabled(false);
+
+        // Clear previous results completely
+        hops.clear();
+        fillTable();
+        
         isTracing = true;
         updateStopCloseText();
-        output->clear();
+        input->setReadOnly(true);
+        traceBtn->setEnabled(false);
+        hopsSpin->setEnabled(false);
 
-        if (lastProc) {
-            lastProc->kill();
-            lastProc->deleteLater();
-            lastProc = nullptr;
-        }
+        lastProc = new QProcess(&dlg);
+        lastProc->setProgram("tracert");
+        lastProc->setArguments({"-h", QString::number(hopsSpin->value()), target});
 
-        // Show scanning dialog
-        if (!scanningDlg) {
-            scanningDlg = new QDialog(&dlg);
-            scanningDlg->setWindowTitle("Scanning...");
-            scanningDlg->setFixedSize(150, 150);
-            scanningDlg->setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
-
-            QVBoxLayout *vbox = new QVBoxLayout(scanningDlg);
-            QLabel *label = new QLabel("Scanning...");
-            vbox->addWidget(label, 0, Qt::AlignHCenter);
-
-            QLabel *animLabel = new QLabel;
-            animLabel->setFixedSize(96, 96);
-            animLabel->setScaledContents(true);
-            QMovie *movie = new QMovie("StdWorking.gif"); // <-- Set your GIF path/resource here
-            animLabel->setMovie(movie);
-            vbox->addWidget(animLabel, 0, Qt::AlignHCenter);
-            movie->start();
-
-            scanningDlg->setModal(false);
-        }
-        scanningDlg->show();
-        scanningDlg->raise();
-        scanningDlg->activateWindow();
-        QCoreApplication::processEvents();
-
-        QProcess *traceProc = new QProcess(&dlg);
-        lastProc = traceProc;
-
-        auto hopCount = std::make_shared<int>(0);
-        auto timer = std::make_shared<QElapsedTimer>();
-        timer->start();
-
-        QObject::connect(traceProc, &QProcess::readyReadStandardOutput, [=, &dlg]() {
-            while (traceProc->canReadLine()) {
-                QString line = QString::fromLocal8Bit(traceProc->readLine()).trimmed();
-                if (line.isEmpty()) continue;
-                // Print line immediately
-                output->append(line);
-
-                // Count hops: lines that start with a number and a space (not headers)
-                QRegularExpression hopNumRe(R"(^\s*(\d+)\s+)");
-                QRegularExpressionMatch numMatch = hopNumRe.match(line);
-                if (numMatch.hasMatch()) {
-                    (*hopCount)++;
+        // Buffer for accumulating multi-line tracert output
+        static QString outputBuffer;
+        
+        QObject::connect(lastProc, &QProcess::readyReadStandardOutput, [&]() {
+            QByteArray data = lastProc->readAllStandardOutput();
+            QString newOutput = QString::fromLocal8Bit(data);
+            outputBuffer += newOutput;
+            
+            // Process complete lines only (split by \r\n or \n)
+            QStringList lines = outputBuffer.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+            
+            // Keep the last line in buffer if it doesn't end with newline (might be incomplete)
+            if (!newOutput.endsWith('\n') && !newOutput.endsWith('\r')) {
+                if (!lines.isEmpty()) {
+                    outputBuffer = lines.takeLast();
+                } else {
+                    outputBuffer.clear();
                 }
+            } else {
+                outputBuffer.clear();
+            }
 
-                // Optionally resize window for long lines
-                QFontMetrics fm(output->font());
-                int margin = 80;
-                int minWidth = 400;
-                int width = fm.horizontalAdvance(line);
-                int newWidth = qMax(minWidth, width + margin);
-                if (dlg.width() < newWidth)
-                    dlg.resize(newWidth, dlg.height());
+            for (const QString &line : lines) {
+                QString cleaned = line.trimmed();
+                if (cleaned.isEmpty()) continue;
+
+                // Skip header lines
+                if (cleaned.contains("Tracing route to") || 
+                    cleaned.contains("over a maximum of") ||
+                    cleaned.contains("hops:") ||
+                    cleaned.contains("Trace complete")) continue;
+
+                // Look for hop number at start of line
+                QRegularExpression hopNumRe(R"(^\s*(\d+)\s+(.*)$)");
+                QRegularExpressionMatch numMatch = hopNumRe.match(cleaned);
+                
+                if (numMatch.hasMatch()) {
+                    int hopNum = numMatch.captured(1).toInt();
+                    QString rest = numMatch.captured(2).trimmed();
+                    
+                    // Skip if hop number is invalid
+                    if (hopNum <= 0 || hopNum > 64) continue;
+                    
+                    qDebug() << "Processing hop" << hopNum << "with data:" << rest;
+                    
+                    HopEntry entry;
+                    entry.hop = hopNum;
+                    
+                    // Handle timeout/asterisk lines
+                    if (rest.contains("Request timed out") || rest.startsWith("*") || rest.contains("* * *")) {
+                        entry.ipHost = "*";
+                        entry.rtt1 = "*";
+                        entry.rtt2 = "*";
+                        entry.rtt3 = "*";
+                        entry.comment = "Request timed out";
+                    } else {
+                        // Windows tracert format: "RTT RTT RTT hostname [IP]" or "RTT RTT RTT IP"
+                        qDebug() << "DEBUG: Parsing line:" << rest;
+                        
+                        // Use regex to extract RTT values and hostname/IP
+                        QRegularExpression tracertRegex(R"(^\s*([*]|[<>]?\d+\s*ms|\d+\s*ms)\s+([*]|[<>]?\d+\s*ms|\d+\s*ms)\s+([*]|[<>]?\d+\s*ms|\d+\s*ms)\s*(.*)$)");
+                        QRegularExpressionMatch match = tracertRegex.match(rest);
+                        
+                        if (match.hasMatch()) {
+                            // Extract RTT values
+                            entry.rtt1 = match.captured(1).trimmed();
+                            entry.rtt2 = match.captured(2).trimmed();
+                            entry.rtt3 = match.captured(3).trimmed();
+                            QString hostPart = match.captured(4).trimmed();
+                            
+                            qDebug() << "DEBUG: RTTs:" << entry.rtt1 << entry.rtt2 << entry.rtt3 << "Host:" << hostPart;
+                            
+                            // Parse hostname/IP part
+                            if (!hostPart.isEmpty()) {
+                                // Look for "hostname [IP]" pattern
+                                QRegularExpression hostIpRegex(R"(^(.+?)\s*\[([^\]]+)\]$)");
+                                QRegularExpressionMatch hostMatch = hostIpRegex.match(hostPart);
+                                
+                                if (hostMatch.hasMatch()) {
+                                    entry.comment = hostMatch.captured(1).trimmed();
+                                    entry.ipHost = hostMatch.captured(2).trimmed();
+                                    qDebug() << "DEBUG: Found hostname [IP] - Host:" << entry.comment << "IP:" << entry.ipHost;
+                                } else {
+                                    // Check if it's just an IP address
+                                    QRegularExpression ipRegex(R"(^\d+\.\d+\.\d+\.\d+$)");
+                                    if (ipRegex.match(hostPart).hasMatch()) {
+                                        entry.ipHost = hostPart;
+                                        entry.comment = "";
+                                        qDebug() << "DEBUG: Found standalone IP:" << entry.ipHost;
+                                    } else {
+                                        // Treat as hostname
+                                        entry.ipHost = hostPart;
+                                        entry.comment = "";
+                                        qDebug() << "DEBUG: Found hostname:" << entry.ipHost;
+                                    }
+                                }
+                            } else {
+                                entry.ipHost = "Unknown";
+                                entry.comment = "";
+                                qDebug() << "DEBUG: No host part found";
+                            }
+                        } else {
+                            // Fallback parsing for malformed lines
+                            qDebug() << "DEBUG: Regex failed, using fallback parsing";
+                            QStringList tokens = rest.split(QRegularExpression(R"(\s+)"), Qt::SkipEmptyParts);
+                            
+                            // Try to extract first 3 RTT-like tokens
+                            QStringList rttValues;
+                            int tokenIdx = 0;
+                            while (tokenIdx < tokens.size() && rttValues.size() < 3) {
+                                QString token = tokens[tokenIdx];
+                                if (token == "*" || token.contains("ms") || 
+                                    (tokenIdx + 1 < tokens.size() && tokens[tokenIdx + 1] == "ms")) {
+                                    if (tokens[tokenIdx + 1] == "ms") {
+                                        rttValues.append(token + " ms");
+                                        tokenIdx += 2;
+                                    } else {
+                                        rttValues.append(token);
+                                        tokenIdx++;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            
+                            // Assign RTT values
+                            entry.rtt1 = rttValues.size() > 0 ? rttValues[0] : "";
+                            entry.rtt2 = rttValues.size() > 1 ? rttValues[1] : "";
+                            entry.rtt3 = rttValues.size() > 2 ? rttValues[2] : "";
+                            
+                            // Remaining tokens are hostname/IP
+                            if (tokenIdx < tokens.size()) {
+                                QString remaining = tokens.mid(tokenIdx).join(" ");
+                                entry.ipHost = remaining;
+                                entry.comment = "";
+                            } else {
+                                entry.ipHost = "Unknown";
+                                entry.comment = "";
+                            }
+                        }
+                    }
+                    
+                    qDebug() << "DEBUG: FINAL - Hop:" << entry.hop << "IP:" << entry.ipHost 
+                             << "RTT1:" << entry.rtt1 << "RTT2:" << entry.rtt2 << "RTT3:" << entry.rtt3 
+                             << "Comment:" << entry.comment;
+                    
+                    // Add valid hop entries
+                    if (entry.hop > 0 && entry.hop <= 64) {
+                        hops.append(entry);
+                        fillTable();
+                    }
+                }
             }
         });
 
-        QObject::connect(traceProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            [=, &isTracing, &updateStopCloseText]() {
-            // Show summary
-            qint64 ms = timer->elapsed();
-            int seconds = static_cast<int>((ms + 500) / 1000); // round to nearest second
-            QString summary = QString("<B>Trace completed in %1 seconds over %2 hops.</B>")
-                .arg(seconds)
-                .arg(*hopCount);
-
-            // Remove "Trace complete." if present and append summary
-            QString text = output->toPlainText();
-            QStringList lines = text.split('\n');
-            if (!lines.isEmpty() && lines.last().trimmed().toLower().startsWith("trace complete")) {
-                lines.removeLast();
-                output->clear();
-                output->append(lines.join("\n"));
-            }
-            output->append(summary);
-
-            traceBtn->setEnabled(true);
+        QObject::connect(lastProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                         [&](int exitCode, QProcess::ExitStatus exitStatus) {
+            Q_UNUSED(exitCode)
+            Q_UNUSED(exitStatus)
+            
+            // Clear the output buffer
+            outputBuffer.clear();
+            
             isTracing = false;
             updateStopCloseText();
-            traceProc->deleteLater();
-            if (scanningDlg) scanningDlg->close();
+            input->setReadOnly(false);
+            traceBtn->setEnabled(true);
+            hopsSpin->setEnabled(true);
+            
+            if (lastProc) {
+                lastProc->deleteLater();
+                lastProc = nullptr;
+            }
         });
 
-        QObject::connect(scanningDlg, &QDialog::rejected, [=]() {
-            scanningDlg->hide();
-        });
-
-        QString cmd = QString("tracert -h %1 %2").arg(hops).arg(host);
-        traceProc->start("cmd", QStringList() << "/c" << cmd);
+        lastProc->start();
     });
 
     QObject::connect(stopCloseBtn, &QPushButton::clicked, [&]() {
-        if (isTracing && lastProc) {
-            lastProc->kill();
-            lastProc->deleteLater();
-            lastProc = nullptr;
-            isTracing = false;
-            traceBtn->setEnabled(true);
-            updateStopCloseText();
-            if (scanningDlg) scanningDlg->close();
-            output->append("<b>Traceroute stopped.</b>");
+        if (isTracing) {
+            if (lastProc) {
+                lastProc->kill();
+            }
         } else {
-            dlg.accept();
+            dlg.close();
         }
     });
 
     QObject::connect(bottomBtn, &QPushButton::clicked, [&]() {
-        output->verticalScrollBar()->setValue(output->verticalScrollBar()->maximum());
+        if (table->rowCount() > 0)
+            table->scrollToBottom();
     });
 
-    dlg.adjustSize();
+    QObject::connect(copyBtn, &QPushButton::clicked, [&]() {
+        QString clipboardText;
+        
+        // Add CSV header
+        clipboardText += "\"Hop\",\"IP/Host\",\"RTT 1\",\"RTT 2\",\"RTT 3\",\"Comments\"\n";
+        
+        // Add all rows in CSV format
+        for (int row = 0; row < table->rowCount(); ++row) {
+            QStringList rowData;
+            for (int col = 0; col < table->columnCount(); ++col) {
+                QTableWidgetItem *item = table->item(row, col);
+                QString cellText = item ? item->text() : "";
+                
+                // Escape quotes in CSV and wrap in quotes
+                cellText.replace("\"", "\"\"");
+                rowData.append("\"" + cellText + "\"");
+            }
+            clipboardText += rowData.join(",") + "\n";
+        }
+        
+        // Copy to clipboard
+        QClipboard *clipboard = QApplication::clipboard();
+        clipboard->setText(clipboardText);
+        
+        // Show brief confirmation
+        copyBtn->setText("Copied!");
+        QTimer::singleShot(1000, [copyBtn]() {
+            copyBtn->setText("Copy All");
+        });
+    });
+
+    // Double-click to sort
+    QObject::connect(table->horizontalHeader(), &QHeaderView::sectionClicked, [&](int logicalIndex) {
+        if (logicalIndex == sortColumn) {
+            sortOrder = (sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+        } else {
+            sortColumn = logicalIndex;
+            sortOrder = Qt::AscendingOrder;
+        }
+        
+        std::sort(hops.begin(), hops.end(), [&](const HopEntry &a, const HopEntry &b) {
+            QVariant aVal, bVal;
+            switch (sortColumn) {
+                case 0: aVal = a.hop; bVal = b.hop; break;
+                case 1: aVal = a.ipHost; bVal = b.ipHost; break;
+                case 2: aVal = a.rtt1; bVal = b.rtt1; break;
+                case 3: aVal = a.rtt2; bVal = b.rtt2; break;
+                case 4: aVal = a.rtt3; bVal = b.rtt3; break;
+                case 5: aVal = a.comment; bVal = b.comment; break;
+            }
+            return (sortOrder == Qt::AscendingOrder) ? aVal.toString() < bVal.toString() : aVal.toString() > bVal.toString();
+        });
+        
+        fillTable();
+    });
+
+    input->setFocus();
     dlg.exec();
 }
 
@@ -1615,11 +2013,15 @@ void showWifiScanDialog(QWidget *parent) {
     table->setFixedWidth(630);
 
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-    table->setColumnWidth(0, 210);
-    table->setColumnWidth(1, 210);
-    table->setColumnWidth(2, 110);
-    table->setColumnWidth(3, 90);
-    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+
+    // --- Adjusted column widths for better fit ---
+    table->setColumnWidth(0, 160); // SSID
+    table->setColumnWidth(1, 180); // BSSID
+    table->setColumnWidth(2, 110); // Signal
+    table->setColumnWidth(3, 140); // Channel (wider so header is fully visible)
+    // ---------------------------------------------
+
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     layout->addWidget(table);
 
