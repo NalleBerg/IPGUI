@@ -6,7 +6,7 @@ REM Configure the project for Visual Studio 2022 x64
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
 REM Build in Release mode
-cmake --build build --config Release
+cmake --build build --config Release --verbose
 
 REM Deploy Qt dependencies
 C:\Qt\6.9.1\msvc2022_64\bin\windeployqt.exe  .\build\Release\IPGUI.exe

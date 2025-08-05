@@ -1,13 +1,3 @@
-// License: This project is licensed under the GNU General Public License v2.0 (GPL-2.0).
-// Project author: Nalle Berg
-// Project name: IPGui
-// Project description: A simple IP lookup/renew tool for Windows.
-// Project version: 3.8.7
-// Compiler: MSVC 19.29.30133.0
-// Target platform: Windows
-// Target architecture: x64
-// Build configuration: x64 Release
-
 
 // Windows API - Must be included before Qt headers.
 #define WIN32_LEAN_AND_MEAN
@@ -16,10 +6,12 @@
 #include <wlanapi.h>
 #include <objbase.h>
 #include <wtypes.h>
+#include <wincrypt.h>
 #pragma comment(lib, "wlanapi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "crypt32.lib")
 
 
 #include <QApplication>
@@ -117,12 +109,196 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "3.8.7";
+const QString VersionNumber = "4.0.0";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
+
+// Version checking function
+void checkForUpdates(QWidget *parent, bool silent = false) {
+    QNetworkAccessManager *manager = new QNetworkAccessManager(parent);
+    QNetworkRequest request(QUrl("https://prog.nalle.no/user/data/apps/version.php"));
+    request.setHeader(QNetworkRequest::UserAgentHeader, "IPGui Version Checker");
+    
+    QNetworkReply *reply = manager->get(request);
+    QTimer *timer = new QTimer(parent);
+    timer->setSingleShot(true);
+    
+    QObject::connect(reply, &QNetworkReply::finished, [=]() {
+        timer->stop();
+        timer->deleteLater();
+        
+        if (reply->error() != QNetworkReply::NoError) {
+            if (!silent) {
+                QMessageBox msgBox(parent);
+                msgBox.setWindowTitle("Update Check");
+                msgBox.setText("Could not check for updates.\nPlease check your internet connection.");
+                msgBox.setIcon(QMessageBox::Warning);
+                msgBox.setStyleSheet(
+                    "QMessageBox { "
+                    "    background-color: #f8f9fa; "
+                    "    border: 2px solid #34495e; "
+                    "    border-radius: 8px; "
+                    "} "
+                    "QPushButton { "
+                    "    background-color: #e74c3c; "
+                    "    color: white; "
+                    "    border: none; "
+                    "    border-radius: 5px; "
+                    "    font-weight: bold; "
+                    "    padding: 8px 16px; "
+                    "    font-size: 10pt; "
+                    "} "
+                    "QPushButton:hover { background-color: #c0392b; } "
+                    "QPushButton:pressed { background-color: #a93226; }"
+                );
+                msgBox.exec();
+            }
+            reply->deleteLater();
+            manager->deleteLater();
+            return;
+        }
+        
+        QByteArray data = reply->readAll();
+        reply->deleteLater();
+        manager->deleteLater();
+        
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(data, &error);
+        
+        if (error.error != QJsonParseError::NoError) {
+            if (!silent) {
+                QMessageBox::warning(parent, "Update Check", "Could not parse version information.");
+            }
+            return;
+        }
+        
+        QJsonObject obj = doc.object();
+        if (!obj.value("success").toBool()) {
+            if (!silent) {
+                QMessageBox::warning(parent, "Update Check", "Version check failed on server.");
+            }
+            return;
+        }
+        
+        QString latestVersion = obj.value("latest_version").toString();
+        QString downloadUrl = obj.value("download_url").toString();
+        QString filename = obj.value("filename").toString();
+        double fileSizeMB = obj.value("filesize_mb").toDouble();
+        QString lastModified = obj.value("last_modified").toString();
+        
+        // Compare versions (simple string comparison for now)
+        if (latestVersion > VersionNumber) {
+            QDialog dlg(parent);
+            dlg.setWindowTitle("Update Available");
+            dlg.setStyleSheet(
+                "QDialog { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #3498db; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "    margin: 2px; "
+                "} "
+                "QPushButton:hover { background-color: #2980b9; } "
+                "QPushButton:pressed { background-color: #1f618d; } "
+                "QPushButton#downloadBtn { background-color: #27ae60; } "
+                "QPushButton#downloadBtn:hover { background-color: #2ecc71; } "
+                "QPushButton#downloadBtn:pressed { background-color: #229954; }"
+            );
+            
+            QVBoxLayout *layout = new QVBoxLayout(&dlg);
+            
+            QLabel *title = new QLabel("<b>New Version Available!</b>");
+            title->setAlignment(Qt::AlignCenter);
+            title->setStyleSheet("font-size: 14pt; color: #27ae60; font-weight: bold; margin: 10px;");
+            layout->addWidget(title);
+            
+            QLabel *info = new QLabel(QString(
+                "<b>Current Version:</b> %1<br>"
+                "<b>Latest Version:</b> %2<br>"
+                "<b>File:</b> %3<br>"
+                "<b>Size:</b> %.1f MB<br>"
+                "<b>Released:</b> %4<br><br>"
+                "A newer version is available. Download it here <a href='%5'>%5</a>.<br>"
+                "Uninstall the old version before you install the new one."
+            ).arg(VersionNumber, latestVersion, filename).arg(fileSizeMB).arg(lastModified, downloadUrl));
+            info->setTextFormat(Qt::RichText);
+            info->setTextInteractionFlags(Qt::TextBrowserInteraction);
+            info->setOpenExternalLinks(true);
+            info->setStyleSheet("color: #2c3e50; font-size: 10pt; margin: 10px;");
+            layout->addWidget(info);
+            
+            QHBoxLayout *btnLayout = new QHBoxLayout();
+            QPushButton *downloadBtn = new QPushButton("Download");
+            downloadBtn->setObjectName("downloadBtn");
+            QPushButton *laterBtn = new QPushButton("Later");
+            
+            btnLayout->addWidget(downloadBtn);
+            btnLayout->addWidget(laterBtn);
+            layout->addLayout(btnLayout);
+            
+            QObject::connect(downloadBtn, &QPushButton::clicked, [&dlg, downloadUrl]() {
+                QDesktopServices::openUrl(QUrl(downloadUrl));
+                dlg.accept();
+            });
+            
+            QObject::connect(laterBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+            
+            dlg.exec();
+        } else {
+            if (!silent) {
+                QMessageBox msgBox(parent);
+                msgBox.setWindowTitle("Update Check");
+                msgBox.setText(QString("You have the latest version (%1)!").arg(VersionNumber));
+                msgBox.setIcon(QMessageBox::Information);
+                msgBox.setStyleSheet(
+                    "QMessageBox { "
+                    "    background-color: #f8f9fa; "
+                    "    border: 2px solid #34495e; "
+                    "    border-radius: 8px; "
+                    "} "
+                    "QPushButton { "
+                    "    background-color: #27ae60; "
+                    "    color: white; "
+                    "    border: none; "
+                    "    border-radius: 5px; "
+                    "    font-weight: bold; "
+                    "    padding: 8px 16px; "
+                    "    font-size: 10pt; "
+                    "} "
+                    "QPushButton:hover { background-color: #2ecc71; } "
+                    "QPushButton:pressed { background-color: #229954; }"
+                );
+                msgBox.exec();
+            }
+        }
+    });
+    
+    QObject::connect(timer, &QTimer::timeout, [=]() {
+        reply->abort();
+        reply->deleteLater();
+        manager->deleteLater();
+        timer->deleteLater();
+        if (!silent) {
+            QMessageBox::warning(parent, "Update Check", "Update check timed out.");
+        }
+    });
+    
+    timer->start(10000); // 10 second timeout
+}
 
 // Declaring functions for port scanner dialog
 void showPortScanDialog(QWidget *parent, const QString &initialTarget = QString());
 void showLanSharesDialog(QWidget *parent, const QString &singleTarget = QString());
+void showSslCertificateDialog(QWidget *parent = nullptr);
+void showPingDialog(QWidget *parent);
+void showTracerouteDialog(QWidget *parent);
 
 // Helper: Belong to showNworkScannerDialog
 class LinkDelegate : public QStyledItemDelegate {
@@ -311,104 +487,217 @@ QString getDefaultGateway(const QString& ipAddress) {
     return gateway;
 }
 
+// Helper: Simple clickable label widget for text links
+class SimpleClickableLabel : public QLabel {
+public:
+    SimpleClickableLabel(const QString &text, std::function<void()> clickHandler, QWidget *parent = nullptr)
+        : QLabel(text, parent), m_clickHandler(clickHandler) {
+        setCursor(Qt::PointingHandCursor);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton) {
+            m_clickHandler();
+        }
+        QLabel::mousePressEvent(event);
+    }
+
+private:
+    std::function<void()> m_clickHandler;
+};
+
 void showNetworkScannerDialog(QWidget *parent) {
-    QDialog *dlg = new QDialog(parent);
-    dlg->setWindowTitle("IP Scanner");
-    dlg->setMinimumWidth(525);
-    dlg->setMaximumWidth(525);
-    dlg->setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
+    // DPI-AWARE IP SCANNER - Modern styling like traceroute and ARP
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Network IP Scanner");
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling
+    int physicalWidth = static_cast<int>(1200 / dpiRatio);
+    int physicalHeight = static_cast<int>(800 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
+    QLabel *prompt = new QLabel("Network IP Scanner - Scan for devices in your local network:", &dlg);
+    prompt->setGeometry(10, 10, physicalWidth-20, 25);
+    prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 11pt; }");
 
-    QVBoxLayout *layout = new QVBoxLayout(dlg);
-    layout->setSpacing(0);
-    layout->setContentsMargins(0, 0, 0, 0);
+    // IP Range input section
+    QLabel *fromLabel = new QLabel("From IP:", &dlg);
+    fromLabel->setGeometry(10, 45, 60, 25);
+    fromLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
+    
+    QLineEdit *fromEdit = new QLineEdit(&dlg);
+    fromEdit->setGeometry(75, 45, 150, 25);
+    fromEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
+    
+    QLabel *toLabel = new QLabel("To IP:", &dlg);
+    toLabel->setGeometry(240, 45, 45, 25);
+    toLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
+    
+    QLineEdit *toEdit = new QLineEdit(&dlg);
+    toEdit->setGeometry(290, 45, 150, 25);
+    toEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
 
-    QLabel *prompt = new QLabel("Scan for devices in your local network:");
-    prompt->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(prompt);
-
-    layout->addSpacing(20);
-
-    QHBoxLayout *ipRangeLayout = new QHBoxLayout();
-    ipRangeLayout->setSpacing(0);
-    ipRangeLayout->setContentsMargins(0, 0, 0, 0);
-    QLabel *fromLabel = new QLabel("<b>From:</b>");
-    QLineEdit *fromEdit = new QLineEdit;
-    QLabel *toLabel = new QLabel("<b>To:</b>");
-    QLineEdit *toEdit = new QLineEdit;
-    ipRangeLayout->addWidget(fromLabel);
-    ipRangeLayout->addWidget(fromEdit);
-    ipRangeLayout->addSpacing(8);
-    ipRangeLayout->addWidget(toLabel);
-    ipRangeLayout->addWidget(toEdit);
-    layout->addLayout(ipRangeLayout);
-
-    QHBoxLayout *btnLayout = new QHBoxLayout();
-    btnLayout->setSpacing(0);
-    btnLayout->setContentsMargins(0, 0, 0, 0);
-    QPushButton *scanBtn = new QPushButton("Scan");
-    QPushButton *stopCloseBtn = new QPushButton("Close");
-    btnLayout->addStretch();
-    btnLayout->addWidget(scanBtn);
-    btnLayout->addWidget(stopCloseBtn);
-    btnLayout->addStretch();
-    layout->addLayout(btnLayout);
-
-    QProgressBar *progress = new QProgressBar;
+    // Progress bar and status
+    QProgressBar *progress = new QProgressBar(&dlg);
+    progress->setGeometry(10, 80, physicalWidth-20, 20);
     progress->setMinimum(0);
     progress->setMaximum(254);
-    progress->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    progress->setFixedHeight(14);
-    progress->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(progress);
+    progress->setValue(0);
+    progress->setTextVisible(true);
+    progress->setStyleSheet(
+        "QProgressBar { "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "    text-align: center; "
+        "    font-weight: bold; "
+        "    color: #2c3e50; "
+        "} "
+        "QProgressBar::chunk { "
+        "    background-color: #3498db; "
+        "    border-radius: 6px; "
+        "}"
+    );
 
-    QLabel *foundLabel = new QLabel("Devices found: 0");
-    foundLabel->setAlignment(Qt::AlignLeft);
-    foundLabel->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(foundLabel);
+    QLabel *foundLabel = new QLabel("Devices found: 0", &dlg);
+    foundLabel->setGeometry(10, 110, physicalWidth-20, 25);
+    foundLabel->setAlignment(Qt::AlignCenter);
+    foundLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 10pt; }");
 
-    layout->addSpacing(20);
-
-    QTableWidget *deviceTable = new QTableWidget();
-    deviceTable->setColumnCount(3);
-    deviceTable->setRowCount(0);
-    deviceTable->setHorizontalHeaderLabels(QStringList() << "IP Address" << "Host Name" << "Actions");
-    deviceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    deviceTable->verticalHeader()->setVisible(false);
+    // Create modern table for devices
+    QTableWidget *deviceTable = new QTableWidget(&dlg);
+    deviceTable->setColumnCount(4);
+    QStringList headers = {"IP Address", "Host Name", "Port Scan", "Shares"};
+    deviceTable->setHorizontalHeaderLabels(headers);
+    deviceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     deviceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    deviceTable->setSelectionMode(QAbstractItemView::NoSelection);
-
-    // --- Only add scrollbars, do not change any sizes ---
-    deviceTable->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    deviceTable->setSelectionMode(QAbstractItemView::NoSelection); // Disable selection completely
+    deviceTable->setFocusPolicy(Qt::NoFocus); // Remove focus ability
+    deviceTable->verticalHeader()->setVisible(false);
+    
+    // Position table with proper DPI-corrected dimensions - leave space for buttons at bottom
+    int tableWidth = physicalWidth - 20;
+    int tableHeight = physicalHeight - 195; // Increased from 185 to prevent button overlap
+    deviceTable->setGeometry(10, 145, tableWidth, tableHeight);
     deviceTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    // ----------------------------------------------------
+    deviceTable->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    
+    // Modern table styling matching other dialogs without selection effects
+    deviceTable->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    
+    QFont headerFont = deviceTable->horizontalHeader()->font();
+    headerFont.setBold(true);
+    deviceTable->horizontalHeader()->setFont(headerFont);
 
-    deviceTable->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    deviceTable->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(deviceTable);
+    // Set column widths for device table
+    int colWidths[] = {120, 200, 120, 120}; // Total: 560
+    for (int i = 0; i < 4; i++) {
+        deviceTable->setColumnWidth(i, colWidths[i]);
+    }
 
-    deviceTable->setItemDelegateForColumn(0, new LinkDelegate(deviceTable));
 
-    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), dlg);
-    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    // Modern buttons positioned at bottom - centered
+    int buttonY = physicalHeight - 47; // Move buttons 3px further down for a small gap above output window
+    int buttonWidth = 100;
+    int buttonSpacing = 15;
+    int totalButtonWidth = (buttonWidth * 2) + buttonSpacing;
+    int startX = (physicalWidth - totalButtonWidth) / 2;
 
-    // State for scan
-    auto scanRunning = std::make_shared<bool>(false);
-    auto cancelRequested = std::make_shared<bool>(false);
+    QPushButton *scanBtn = new QPushButton("Start Scan", &dlg);
+    scanBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    scanBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
 
-    // --- Stop/Close button text logic ---
-    auto updateStopCloseBtn = [&]() {
-        if (*scanRunning) {
-            stopCloseBtn->setText("Stop");
-            stopCloseBtn->setToolTip("Stop the scan");
-            closeShortcut->setEnabled(false);
-        } else {
-            stopCloseBtn->setText("Close");
-            stopCloseBtn->setToolTip("Close this dialog");
-            closeShortcut->setEnabled(true);
-        }
-    };
+    QPushButton *stopCloseBtn = new QPushButton("Close", &dlg);
+    stopCloseBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    stopCloseBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
 
-    // Autofill IP range
+    // Add a horizontal line (QFrame) between the buttons and the IPv6 output window
+    QFrame *hr = new QFrame(&dlg);
+    int hrWidth = int(physicalWidth * 0.75);
+    int hrX = (physicalWidth - hrWidth) / 2;
+    int hrY = buttonY + 35 + 28; // 28px padding below buttons for more space
+    hr->setGeometry(hrX, hrY, hrWidth, 2);
+    hr->setFrameShape(QFrame::HLine);
+    hr->setFrameShadow(QFrame::Sunken);
+    hr->setLineWidth(2);
+    hr->setStyleSheet("QFrame { background: #b0b6c3; border-radius: 2px; }");
+
+    // Autofill IP range with local subnet
     QString defaultBase = "192.168.1";
     for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
         for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
@@ -426,7 +715,13 @@ void showNetworkScannerDialog(QWidget *parent) {
     fromEdit->setText(defaultBase + ".1");
     toEdit->setText(defaultBase + ".254");
 
-    QThreadPool *pool = new QThreadPool(dlg);
+    // Ctrl+W shortcut
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
+
+    // Thread pool for parallel scanning
+    QThreadPool *pool = new QThreadPool(&dlg);
     pool->setMaxThreadCount(16);
 
     // Store found devices for sorting and updating
@@ -438,16 +733,79 @@ void showNetworkScannerDialog(QWidget *parent) {
     };
     auto foundDevices = std::make_shared<QList<DeviceInfo>>();
 
-    QObject::connect(scanBtn, &QPushButton::clicked, [=]() {
+    // State for scan control
+    auto scanRunning = std::make_shared<bool>(false);
+    auto cancelRequested = std::make_shared<bool>(false);
+
+    // Update button text and state
+    auto updateStopCloseBtn = [&]() {
+        if (*scanRunning) {
+            stopCloseBtn->setText("Stop");
+            stopCloseBtn->setToolTip("Stop the current scan");
+            stopCloseBtn->setStyleSheet(
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            closeShortcut->setEnabled(false);
+        } else {
+            stopCloseBtn->setText("Close");
+            stopCloseBtn->setToolTip("Close this dialog");
+            stopCloseBtn->setStyleSheet(
+                "QPushButton { "
+                "    background-color: #34495e; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "} "
+                "QPushButton:hover { background-color: #2c3e50; } "
+                "QPushButton:pressed { background-color: #1a252f; }"
+            );
+            closeShortcut->setEnabled(true);
+        }
+    };
+
+    // Scan button click handler
+    QObject::connect(scanBtn, &QPushButton::clicked, [&]() {
         QString fromIp = fromEdit->text().trimmed();
         QString toIp = toEdit->text().trimmed();
 
         QHostAddress fromAddr(fromIp), toAddr(toIp);
         if (fromAddr.protocol() != QAbstractSocket::IPv4Protocol ||
             toAddr.protocol() != QAbstractSocket::IPv4Protocol) {
-            QMessageBox::warning(dlg, "Input Error", "Invalid IP address format.");
+            QMessageBox msgBox(&dlg);
+            msgBox.setWindowTitle("Input Error");
+            msgBox.setText("Invalid IP address format.");
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            msgBox.exec();
             return;
         }
+        
         quint32 from = fromAddr.toIPv4Address();
         quint32 to = toAddr.toIPv4Address();
         if (from > to) std::swap(from, to);
@@ -476,14 +834,17 @@ void showNetworkScannerDialog(QWidget *parent) {
         for (int i = 0; i < ipList.size(); ++i) {
             pool->start([=]() {
                 if (*cancelRequested) return;
+                
                 QString ip = ipList[i];
                 QProcess ping;
                 ping.start("ping", QStringList() << "-n" << "1" << "-w" << "100" << ip);
                 ping.waitForFinished(300);
                 QString result = ping.readAllStandardOutput();
                 bool alive = result.contains("TTL=");
+                
                 if (alive) {
                     QString host = QHostInfo::fromName(ip).hostName();
+                    if (host == ip) host = ""; // Clear if same as IP
 
                     // HTTP/HTTPS check
                     bool hasHttps = false, hasHttp = false;
@@ -520,63 +881,86 @@ void showNetworkScannerDialog(QWidget *parent) {
                             int row = deviceTable->rowCount();
                             deviceTable->insertRow(row);
 
+                            // IP Address column (clickable if has web interface)
                             QTableWidgetItem *ipItem = new QTableWidgetItem(dev.ip);
-                            ipItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-                            ipItem->setFlags(ipItem->flags() & ~Qt::ItemIsEditable);
-                            ipItem->setToolTip(dev.hasHttps ? "Click to open HTTPS" :
-                                               dev.hasHttp ? "Click to open HTTP" : "No web interface detected");
-                            ipItem->setData(Qt::UserRole + 1, dev.hasHttps);
-                            ipItem->setData(Qt::UserRole + 2, dev.hasHttp);
-                            if (dev.hasHttps || dev.hasHttp)
-                                ipItem->setForeground(QBrush(QColor("#1c2684")));
-                            else
-                                ipItem->setForeground(QBrush(QColor("#222")));
+                            ipItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+                            if (dev.hasHttps || dev.hasHttp) {
+                                ipItem->setForeground(QBrush(QColor("#3498db")));
+                                QFont linkFont = ipItem->font();
+                                linkFont.setUnderline(true);
+                                linkFont.setBold(true);
+                                ipItem->setFont(linkFont);
+                                ipItem->setToolTip("Click to open web interface");
+                                // Store hover state data for styling
+                                ipItem->setData(Qt::UserRole + 10, true); // Mark as clickable
+                            }
                             deviceTable->setItem(row, 0, ipItem);
 
-                            QTableWidgetItem *hostItem = new QTableWidgetItem((dev.host.isEmpty() || dev.host == dev.ip) ? "" : dev.host);
+                            // Host Name column
+                            QTableWidgetItem *hostItem = new QTableWidgetItem(dev.host);
+                            hostItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
                             deviceTable->setItem(row, 1, hostItem);
 
-                            // --- Actions column: Port Scan and Shares buttons ---
-                            QWidget *btnWidget = new QWidget;
-                            QHBoxLayout *btnLayout = new QHBoxLayout(btnWidget);
-                            btnLayout->setContentsMargins(0, 0, 0, 0);
-                            btnLayout->setSpacing(4);
+                            // Port Scan column - simple text link
+                            QWidget *portWidget = new QWidget;
+                            QHBoxLayout *portLayout = new QHBoxLayout(portWidget);
+                            portLayout->setContentsMargins(8, 0, 0, 0);
+                            portLayout->setSpacing(0);
 
-                            QPushButton *portScanBtn = new QPushButton("Port Scan");
-                            portScanBtn->setToolTip("Scan ports on this device");
-                            QPushButton *sharesBtn = new QPushButton("Shares");
-                            sharesBtn->setToolTip("Show shared folders on this device");
-
-                            btnLayout->addWidget(portScanBtn);
-                            btnLayout->addWidget(sharesBtn);
-                            btnWidget->setLayout(btnLayout);
-
-                            deviceTable->setCellWidget(row, 2, btnWidget);
-
-                            QObject::connect(portScanBtn, &QPushButton::clicked, [=]() {
-                                dlg->accept();
-                                showPortScanDialog(parent, dev.ip);
+                            auto portScanLink = new SimpleClickableLabel("Port Scan ►", [parent, ip = dev.ip]() {
+                                // Use QTimer::singleShot to delay dialog creation and avoid parent dialog issues
+                                QTimer::singleShot(0, [parent, ip]() {
+                                    showPortScanDialog(parent, ip);
+                                });
                             });
-                            QObject::connect(sharesBtn, &QPushButton::clicked, [=]() {
-                                dlg->accept();
-                                showLanSharesDialog(parent, dev.ip);
+                            portScanLink->setToolTip("Scan ports on this device");
+                            portScanLink->setStyleSheet(
+                                "QLabel { "
+                                "    color: #3498db; "
+                                "    font-size: 10pt; "
+                                "    padding: 2px; "
+                                "} "
+                                "QLabel:hover { "
+                                "    color: #e74c3c; "
+                                "}"
+                            );
+                            portLayout->addWidget(portScanLink);
+                            portLayout->addStretch();
+                            deviceTable->setCellWidget(row, 2, portWidget);
+
+                            // Shares column - simple text link  
+                            QWidget *sharesWidget = new QWidget;
+                            QHBoxLayout *sharesLayout = new QHBoxLayout(sharesWidget);
+                            sharesLayout->setContentsMargins(8, 0, 0, 0);
+                            sharesLayout->setSpacing(0);
+
+                            auto sharesLink = new SimpleClickableLabel("Shares ►", [parent, ip = dev.ip]() {
+                                // Use QTimer::singleShot to delay dialog creation and avoid parent dialog issues
+                                QTimer::singleShot(0, [parent, ip]() {
+                                    showLanSharesDialog(parent, ip);
+                                });
                             });
+                            sharesLink->setToolTip("Show shared folders on this device");
+                            sharesLink->setStyleSheet(
+                                "QLabel { "
+                                "    color: #e67e22; "
+                                "    font-size: 10pt; "
+                                "    padding: 2px; "
+                                "} "
+                                "QLabel:hover { "
+                                "    color: #e74c3c; "
+                                "}"
+                            );
+                            sharesLayout->addWidget(sharesLink);
+                            sharesLayout->addStretch();
+                            deviceTable->setCellWidget(row, 3, sharesWidget);
                         }
-                        // --- Add an empty row for air at the bottom ---
-                        int emptyRow = deviceTable->rowCount();
-                        deviceTable->insertRow(emptyRow);
-                        for (int col = 0; col < deviceTable->columnCount(); ++col) {
-                            QTableWidgetItem *emptyItem = new QTableWidgetItem("");
-                            emptyItem->setFlags(emptyItem->flags() & ~Qt::ItemIsEditable);
-                            deviceTable->setItem(emptyRow, col, emptyItem);
-                        }
-                        deviceTable->setRowHeight(emptyRow, 24); // Adjust height for more/less air
-                        // -------------------------------------------------
                     }, Qt::QueuedConnection);
 
                     QMetaObject::invokeMethod(foundLabel, "setText", Qt::QueuedConnection,
                         Q_ARG(QString, QString("Devices found: %1").arg(++(*foundCount))));
                 }
+                
                 QMetaObject::invokeMethod(progress, "setValue", Qt::QueuedConnection, Q_ARG(int, ++(*progressCount)));
                 QMetaObject::invokeMethod(progress, [=]() {
                     (*finishedCount)++;
@@ -584,7 +968,6 @@ void showNetworkScannerDialog(QWidget *parent) {
                         *scanRunning = false;
                         scanBtn->setEnabled(true);
                         updateStopCloseBtn();
-                        // --- Ensure progress bar is 100% at the end ---
                         progress->setValue(progress->maximum());
                     }
                 }, Qt::QueuedConnection);
@@ -592,33 +975,39 @@ void showNetworkScannerDialog(QWidget *parent) {
         }
     });
 
+    // Handle IP item clicks to open web interface
+    QObject::connect(deviceTable, &QTableWidget::itemClicked, [&](QTableWidgetItem *item) {
+        if (item->column() == 0) { // IP column
+            QString ip = item->text();
+            for (const DeviceInfo &dev : *foundDevices) {
+                if (dev.ip == ip) {
+                    if (dev.hasHttps) {
+                        QDesktopServices::openUrl(QUrl("https://" + ip));
+                    } else if (dev.hasHttp) {
+                        QDesktopServices::openUrl(QUrl("http://" + ip));
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
     // Stop/Close button logic
-    QObject::connect(stopCloseBtn, &QPushButton::clicked, [=]() {
+    QObject::connect(stopCloseBtn, &QPushButton::clicked, [&]() {
         if (*scanRunning) {
             *cancelRequested = true;
             *scanRunning = false;
             scanBtn->setEnabled(true);
             updateStopCloseBtn();
-            // Also force progress bar to 100% if stopped
             progress->setValue(progress->maximum());
         } else {
-            dlg->accept();
+            dlg.accept();
         }
     });
 
-    // Ctrl+W closes only if not scanning
-    QObject::connect(closeShortcut, &QShortcut::activated, [=]() {
-        if (!*scanRunning) dlg->accept();
-    });
-
-    stopCloseBtn->setEnabled(true);
-    scanBtn->setEnabled(true);
     updateStopCloseBtn();
-
-    dlg->exec();
-    delete dlg;
+    dlg.exec();
 }
-
 
 void updateIpDisplay(QTextEdit *infoBox) {
     QString ipAddress, subnetMask, adapterName, macAddress, defaultGateway, externalIp;
@@ -696,7 +1085,7 @@ void updateIpDisplay(QTextEdit *infoBox) {
         "</td></tr>"
         "<tr><td><b>Subnet Mask</b></td><td align='right'>" + subnetMask + "</td></tr>"
         "<tr><td><b>Default Gateway</b></td><td align='right'>" + defaultGateway + "</td></tr>"
-        "<tr><td><b>External IP Address</b></td><td align='right'>" + externalIp + "</td></tr>"
+        "<tr><td><b>External IP</b></td><td align='right'>" + externalIp + "</td></tr>"
         "</table>"
     "</div>";
     infoBox->setHtml(basicInfoHtml);
@@ -759,18 +1148,52 @@ QMap<QPair<int, QString>, PortInfo> loadPortInfoCSV(QWidget *parent = nullptr) {
 void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
     QDialog *dlg = new QDialog(parent);
     dlg->setWindowTitle("Port Scan");
-    dlg->setWindowFlags((dlg->windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::Dialog | Qt::WindowTitleHint);
+    dlg->setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint | Qt::WindowStaysOnTopHint);
+    dlg->setAttribute(Qt::WA_DeleteOnClose); // Ensure proper cleanup
+    
+    // Apply modern styling to dialog
+    dlg->setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
 
     QVBoxLayout *layout = new QVBoxLayout(dlg);
 
     QLabel *inputLabel = new QLabel("Target (IP or hostname):");
+    inputLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QLineEdit *targetEdit = new QLineEdit(initialTarget.isEmpty() ? "127.0.0.1" : initialTarget);
     targetEdit->setToolTip("Enter the IP address or hostname to scan.");
+    targetEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
+    
     QLabel *rangeLabel = new QLabel("Port range (e.g. 1-1024):");
+    rangeLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QLineEdit *rangeEdit = new QLineEdit("1-1024");
     rangeEdit->setToolTip("<div style='white-space:nowrap;'>Enter the port range to scan. You can use a format like 1-1024.<BR>"
                            "The default is 1-1024, which is the most common range for services.<BR>"
                            "You can also specify a single port.</div>");
+    rangeEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
+    
     layout->addWidget(inputLabel);
     layout->addWidget(targetEdit);
     layout->addWidget(rangeLabel);
@@ -778,6 +1201,8 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
 
     QHBoxLayout *currentPortLayout = new QHBoxLayout();
     QLabel *checkingLabel = new QLabel("Checking port number:");
+    checkingLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QLineEdit *currentPortEdit = new QLineEdit;
     currentPortEdit->setToolTip("The port that is being checked.");
     currentPortEdit->setReadOnly(true);
@@ -787,12 +1212,33 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
     font.setBold(true);
     currentPortEdit->setFont(font);
     currentPortEdit->setFixedWidth(100);
+    currentPortEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #e67e22; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    background-color: #fdf2e9; "
+        "    color: #d35400; "
+        "    font-weight: bold; "
+        "}"
+    );
 
     QLabel *progressLabel = new QLabel("0 % done");
     progressLabel->setToolTip("<div style='white-space:nowrap;'>Progress of the scan in percent.<BR>"
                               "This will update as ports are checked.</div>");
     progressLabel->setFixedWidth(120);
     progressLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    progressLabel->setStyleSheet(
+        "QLabel { "
+        "    color: #27ae60; "
+        "    font-weight: bold; "
+        "    font-size: 11pt; "
+        "    background-color: #e8f5e8; "
+        "    border: 2px solid #27ae60; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "}"
+    );
 
     currentPortLayout->addWidget(checkingLabel);
     currentPortLayout->addWidget(currentPortEdit);
@@ -804,19 +1250,59 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
     etaLabel->setMinimumWidth(320);
     etaLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     etaLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    etaLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
     layout->addWidget(etaLabel);
 
     QTextEdit *output = new QTextEdit;
     output->setReadOnly(true);
     output->setLineWrapMode(QTextEdit::NoWrap);
     output->setMinimumHeight(120);
+    output->setTextInteractionFlags(Qt::NoTextInteraction); // Disable all text interaction including selection
+    output->setStyleSheet(
+        "QTextEdit { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    font-family: 'Consolas', 'Courier New', monospace; "
+        "    font-size: 9pt; "
+        "    padding: 6px; "
+        "}"
+    );
     layout->addWidget(output);
 
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *scanBtn = new QPushButton("Scan");
     scanBtn->setToolTip("Start scanning the specified port range on the target.");
+    scanBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
     QPushButton *stopCloseBtn = new QPushButton("Close");
     stopCloseBtn->setToolTip("Close the dialog.");
+    stopCloseBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #3c5872; } "
+        "QPushButton:pressed { background-color: #22313a; }"
+    );
+    
     btnLayout->addWidget(scanBtn);
     btnLayout->addWidget(stopCloseBtn);
     layout->addLayout(btnLayout);
@@ -834,10 +1320,11 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
     };
     updateStopCloseText();
 
+    // Add Ctrl+W shortcut specifically for this dialog (allows force close during scanning)
     QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), dlg);
-    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    closeShortcut->setContext(Qt::WidgetShortcut);
     QObject::connect(closeShortcut, &QShortcut::activated, [=]() {
-        if (!*scanRunning) dlg->accept();
+        dlg->close();
     });
 
     static QMap<QPair<int, QString>, PortInfo> portInfoMap;
@@ -897,7 +1384,7 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
                     QString desc = info.description.isEmpty() ? "No description" : info.description;
                     QMetaObject::invokeMethod(output, [=]() {
                         output->append(
-                            QString("<span style='color:blue; font-weight:bold;'>%1</span> "
+                            QString("<span style='color:#2c3e50; font-weight:bold;'>%1</span> "
                                     "<span style='color:limegreen; font-weight:bold;'>OPEN &#x1F389;</span> "
                                     "<span style='color:gray;'>&nbsp;%2</span> "
                                     "<span style='color:#888;'>&nbsp;%3</span>")
@@ -964,9 +1451,23 @@ void showPortScanDialog(QWidget *parent, const QString &initialTarget) {
         dlg->close();
     });
 
+    // Handle dialog finished signal (proper cleanup)
+    QObject::connect(dlg, &QDialog::finished, [=]() {
+        *scanRunning = false;
+        if (dlg) dlg->deleteLater();
+    });
+
+    // Also handle reject (X button, Escape key, etc.)
+    QObject::connect(dlg, &QDialog::rejected, [=]() {
+        *scanRunning = false;
+        if (dlg) dlg->close();
+    });
+
     dlg->adjustSize();
-    dlg->exec();
-    dlg->deleteLater();
+    dlg->exec(); // Use exec() for proper modal behavior and event handling
+    dlg->raise(); // Bring to front
+    dlg->activateWindow(); // Give focus
+    dlg->setFocus(); // Ensure focus
 }
 
 
@@ -990,6 +1491,7 @@ void showTracerouteDialog(QWidget *parent) {
     
     // Use absolute positioning for all widgets (DPI-corrected coordinates)
     
+
     QLabel *prompt = new QLabel("Enter host or IP to trace:", &dlg);
     prompt->setGeometry(10, 10, physicalWidth-20, 25);
     prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
@@ -999,17 +1501,23 @@ void showTracerouteDialog(QWidget *parent) {
     input->setGeometry(10, 40, physicalWidth-20, 25);
     input->setStyleSheet("QLineEdit { border: 2px solid #3498db; border-radius: 4px; padding: 2px; }");
 
+    // Move hopsLabel and hopsSpin down to avoid overlap
+    int hopsLabelY = 75;
+    int hopsSpinY = 75;
+    
     QLabel *hopsLabel = new QLabel("Max hops:", &dlg);
-    hopsLabel->setGeometry(10, 75, 80, 25);
+    hopsLabel->setGeometry(10, hopsLabelY, 80, 25);
     hopsLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; }");
     
     QSpinBox *hopsSpin = new QSpinBox(&dlg);
     hopsSpin->setToolTip("Maximum number of hops to trace. Default is 30.");
     hopsSpin->setRange(1, 64);
     hopsSpin->setValue(30);
-    hopsSpin->setGeometry(100, 75, 80, 25);
+    hopsSpin->setGeometry(100, hopsSpinY, 80, 25);
     hopsSpin->setStyleSheet("QSpinBox { border: 1px solid #bdc3c7; border-radius: 3px; }");
 
+    int tableY = 145;
+    // ...existing code...
     // Create colorful table with DPI-corrected size
     QTableWidget *table = new QTableWidget(&dlg);
     table->setColumnCount(6);
@@ -1024,7 +1532,7 @@ void showTracerouteDialog(QWidget *parent) {
     // Position table with proper DPI-corrected dimensions - make it 80px smaller in height
     int tableWidth = physicalWidth - 20;
     int tableHeight = physicalHeight - 200; // Reduced by 80px from 120 to clear buttons
-    table->setGeometry(10, 110, tableWidth, tableHeight);
+    table->setGeometry(10, tableY, tableWidth, tableHeight);
     table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn); // Always show vertical scrollbar
     
@@ -1064,10 +1572,50 @@ void showTracerouteDialog(QWidget *parent) {
     }
 
     // Colorful buttons positioned with minimal gap from table
-    int buttonY = physicalHeight - 45; // Position buttons with minimal gap
+    int buttonY = physicalHeight - 45;
+    int buttonWidth = 80;
+    int buttonHeight = 35;
+    int buttonSpacing = 20;
+    int numButtons = 4;
+    int totalButtonWidth = (buttonWidth * numButtons) + (buttonSpacing * (numButtons - 1));
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+
+    // --- Small animated UTF-8 spinner in a black frame, left of Start button ---
+    int spinnerW = 28, spinnerH = 28;
+    QFrame *spinnerFrame = new QFrame(&dlg);
+    spinnerFrame->setFixedSize(spinnerW + 8, spinnerH + 8); // Add padding for border
+    spinnerFrame->setStyleSheet(
+        "QFrame { border: 2px solid black; border-radius: 8px; background: transparent; }"
+    );
+    int spinnerX = startX - spinnerFrame->width() - 16; // 16px gap to left of Start
+    int spinnerY = buttonY + (buttonHeight - spinnerFrame->height()) / 2;
+    spinnerFrame->setGeometry(spinnerX, spinnerY, spinnerFrame->width(), spinnerFrame->height());
+    spinnerFrame->setVisible(true);
+
+    QLabel *spinnerLabel = new QLabel(spinnerFrame);
+    spinnerLabel->setFixedSize(spinnerW, spinnerH);
+    spinnerLabel->move(4, 4); // Center inside frame
+    spinnerLabel->setAlignment(Qt::AlignCenter);
+    spinnerLabel->setStyleSheet(
+        "QLabel { font-size: 18pt; color: #e67e22; background: transparent; }"
+    );
+    spinnerLabel->setVisible(false);
+
+    // Spinner animation frames (UTF-8 Braille dots for smoothness)
+    QStringList spinnerFrames = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
+    int spinnerFrameIdx = 0;
+    QTimer *spinnerTimer = new QTimer(&dlg);
+    spinnerTimer->setInterval(80); // Fast, smooth
+    QObject::connect(spinnerTimer, &QTimer::timeout, [&]() {
+        spinnerLabel->setText(spinnerFrames[spinnerFrameIdx]);
+        spinnerFrame->setVisible(true);
+        spinnerLabel->setVisible(true);
+        spinnerFrameIdx = (spinnerFrameIdx + 1) % spinnerFrames.size();
+    });
+
     QPushButton *traceBtn = new QPushButton("Start", &dlg);
     traceBtn->setToolTip("Start the traceroute to the specified host.");
-    traceBtn->setGeometry(10, buttonY, 80, 35);
+    traceBtn->setGeometry(startX, buttonY, buttonWidth, buttonHeight);
     traceBtn->setStyleSheet(
         "QPushButton { "
         "    background-color: #27ae60; "
@@ -1079,25 +1627,10 @@ void showTracerouteDialog(QWidget *parent) {
         "QPushButton:hover { background-color: #2ecc71; } "
         "QPushButton:pressed { background-color: #229954; }"
     );
-    
-    QPushButton *stopCloseBtn = new QPushButton("Close", &dlg);
-    stopCloseBtn->setToolTip("Stop the traceroute or close the dialog.");
-    stopCloseBtn->setGeometry(100, buttonY, 80, 35);
-    stopCloseBtn->setStyleSheet(
-        "QPushButton { "
-        "    background-color: #e74c3c; "
-        "    color: white; "
-        "    border: none; "
-        "    border-radius: 5px; "
-        "    font-weight: bold; "
-        "} "
-        "QPushButton:hover { background-color: #c0392b; } "
-        "QPushButton:pressed { background-color: #a93226; }"
-    );
-    
+
     QPushButton *bottomBtn = new QPushButton("Bottom", &dlg);
     bottomBtn->setToolTip("Scroll to the bottom of the output.");
-    bottomBtn->setGeometry(190, buttonY, 80, 35);
+    bottomBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 1, buttonY, buttonWidth, buttonHeight);
     bottomBtn->setStyleSheet(
         "QPushButton { "
         "    background-color: #3498db; "
@@ -1109,10 +1642,10 @@ void showTracerouteDialog(QWidget *parent) {
         "QPushButton:hover { background-color: #2980b9; } "
         "QPushButton:pressed { background-color: #1f618d; }"
     );
-    
+
     QPushButton *copyBtn = new QPushButton("Copy All", &dlg);
     copyBtn->setToolTip("Copy all traceroute results to clipboard in CSV format.");
-    copyBtn->setGeometry(280, buttonY, 80, 35);
+    copyBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 2, buttonY, buttonWidth, buttonHeight);
     copyBtn->setStyleSheet(
         "QPushButton { "
         "    background-color: #9b59b6; "
@@ -1125,34 +1658,20 @@ void showTracerouteDialog(QWidget *parent) {
         "QPushButton:pressed { background-color: #7d3c98; }"
     );
 
-    // Animated status indicator with colors - smaller and better positioned
-    QLabel *scanningLabel = new QLabel(&dlg);
-    scanningLabel->setAlignment(Qt::AlignCenter);
-    scanningLabel->setStyleSheet(
-        "QLabel { "
-        "    color: #e67e22; "
+    QPushButton *stopCloseBtn = new QPushButton("Close", &dlg);
+    stopCloseBtn->setToolTip("Stop the traceroute or close the dialog.");
+    stopCloseBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 3, buttonY, buttonWidth, buttonHeight);
+    stopCloseBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
         "    font-weight: bold; "
-        "    font-size: 10pt; "
-        "    background-color: #fdf2e9; "
-        "    border: 2px solid #f39c12; "
-        "    border-radius: 6px; "
-        "    padding: 4px; "
-        "}"
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
     );
-    scanningLabel->setVisible(false);
-    scanningLabel->setGeometry(370, buttonY, 300, 25); // Position after copy button
-
-    // Timer for animated scanning dots
-    QTimer *animTimer = new QTimer(&dlg);
-    int dotCount = 0;
-    
-    QObject::connect(animTimer, &QTimer::timeout, [scanningLabel, &dotCount]() mutable {
-        QStringList spinChars = {"\\", "|", "/", "-"};
-        QString spinner = spinChars[dotCount % 4];
-        scanningLabel->setText(QString("🔍 Tracing route %1").arg(spinner));
-        dotCount++;
-    });
-    animTimer->setInterval(250); // Update every 250ms
 
     // State variables
     bool isTracing = false;
@@ -1168,18 +1687,20 @@ void showTracerouteDialog(QWidget *parent) {
                 "QPushButton:hover { background-color: #c0392b; } "
                 "QPushButton:pressed { background-color: #a93226; }"
             );
-            scanningLabel->setVisible(true);
-            animTimer->start();
+            spinnerFrame->setVisible(true);
+            spinnerLabel->setVisible(true);
+            spinnerTimer->start();
         } else {
             stopCloseBtn->setText("Close");
             stopCloseBtn->setToolTip("Close the dialog");
             stopCloseBtn->setStyleSheet(
-                "QPushButton { background-color: #95a5a6; color: white; border: none; border-radius: 5px; font-weight: bold; } "
-                "QPushButton:hover { background-color: #7f8c8d; } "
-                "QPushButton:pressed { background-color: #6c7b7d; }"
+                "QPushButton { background-color: #34495e; color: white; border: none; border-radius: 5px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #3c5872; } "
+                "QPushButton:pressed { background-color: #22313a; }"
             );
-            scanningLabel->setVisible(false);
-            animTimer->stop();
+            spinnerFrame->setVisible(false);
+            spinnerLabel->setVisible(false);
+            spinnerTimer->stop();
         }
     };
     updateStopCloseText();
@@ -1568,291 +2089,556 @@ void showTracerouteDialog(QWidget *parent) {
 }
 
 void showDhcpStatusDialog(QWidget *parent = nullptr) {
-    QProcess proc;
-    proc.start("ipconfig", QStringList() << "/all");
-    proc.waitForFinished();
-    QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
-
-    QStringList blocks = output.split(QRegularExpression(R"(\r?\n\r?\n)"), Qt::SkipEmptyParts);
-
-    QString info;
-    for (const QString &block : blocks) {
-        if (block.contains("DHCP Enabled", Qt::CaseInsensitive) &&
-            block.contains(": Yes", Qt::CaseInsensitive) &&
-            block.contains("IPv4 Address", Qt::CaseInsensitive)) {
-
-            QStringList lines = block.split('\n', Qt::SkipEmptyParts);
-            QString ifaceName = "Unknown";
-            for (const QString &line : lines) {
-                if (line.contains(':')) {
-                    ifaceName = line.section(':', 0, 0).trimmed();
-                    break;
-                }
-            }
-
-            auto extract = [&](const QString &label) -> QString {
-                QRegularExpression re(label + R"([\s\.]*:[ \t]*([^\r\n]+))");
-                QRegularExpressionMatch m = re.match(block);
-                return m.hasMatch() ? m.captured(1).trimmed() : "N/A";
-            };
-
-            QString dhcpServer    = extract("DHCP Server");
-            QString leaseObtained = extract("Lease Obtained");
-            QString leaseExpires  = extract("Lease Expires");
-            QString clientId      = extract("DHCPv4 Client DUID");
-
-            info = QString(
-                "<table cellpadding='3'>"
-                "<tr><td><b>Interface:</b></td><td>%1</td></tr>"
-                "<tr><td><b>DHCP Enabled:</b></td><td>Yes</td></tr>"
-                "<tr><td><b>DHCP Server:</b></td><td>%2</td></tr>"
-                "<tr><td><b>Lease Obtained:</b></td><td>%3</td></tr>"
-                "<tr><td><b>Lease Expires:</b></td><td>%4</td></tr>"
-                "<tr><td><b>DHCP Client ID:</b></td><td>%5</td></tr>"
-                "</table>"
-            ).arg(ifaceName, dhcpServer, leaseObtained, leaseExpires, clientId);
-
-            break;
-        }
-    }
-
-    if (info.isEmpty())
-        info = "No active DHCP-enabled interface found.";
-
+    // DPI-AWARE DHCP STATUS DIALOG - Modern styling like traceroute
     QDialog dlg(parent);
     dlg.setWindowTitle("DHCP Status");
-    addCtrlWClose(&dlg);
-  
-    QVBoxLayout layout(&dlg);
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling
+    int physicalWidth = static_cast<int>(900 / dpiRatio);
+    int physicalHeight = static_cast<int>(700 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
+    QLabel *prompt = new QLabel("DHCP Status Information:", &dlg);
+    prompt->setGeometry(10, 10, physicalWidth-20, 25);
+    prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 11pt; }");
 
-    QLabel label(info);
-    label.setTextFormat(Qt::RichText);
-    label.setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout.addWidget(&label);
+    // Create modern table with DPI-corrected size
+    QTableWidget *table = new QTableWidget(&dlg);
+    table->setColumnCount(2);
+    QStringList headers = {"Property", "Value"};
+    table->setHorizontalHeaderLabels(headers);
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
+    
+    // Position table with proper DPI-corrected dimensions
+    int tableWidth = physicalWidth - 20;
+    int tableHeight = physicalHeight - 120;
+    table->setGeometry(10, 45, tableWidth, tableHeight);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    
+    QFont headerFont = table->horizontalHeader()->font();
+    headerFont.setBold(true);
+    table->horizontalHeader()->setFont(headerFont);
 
-    QPushButton closeBtn("Close");
-    QObject::connect(&closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout.addWidget(&closeBtn);
+    // Set column widths
+    table->setColumnWidth(0, 200); // Property column
+    table->setColumnWidth(1, tableWidth - 200); // Value column
 
-    QLabel *warnLabel = new QLabel("<b><span style='color:gray; font-size:7pt;'>"
-                                "If special characters look wrong, your system<BR>encoding may not match the console output."
-                                "</span></b>");
-    warnLabel->setAlignment(Qt::AlignCenter);
-    layout.addWidget(warnLabel);
+    // Modern buttons positioned at bottom - centered
+    int buttonY = physicalHeight - 45;
+    int buttonWidth = 80;
+    int buttonSpacing = 10;
+    int totalButtonWidth = (buttonWidth * 3) + (buttonSpacing * 2);
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+    
+    QPushButton *refreshBtn = new QPushButton("Refresh", &dlg);
+    refreshBtn->setToolTip("Refresh DHCP status information.");
+    refreshBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    refreshBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
+    QPushButton *closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setToolTip("Close the dialog.");
+    closeBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
+    );
+    
+    QPushButton *copyBtn = new QPushButton("Copy", &dlg);
+    copyBtn->setToolTip("Copy DHCP information to clipboard.");
+    copyBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 2, buttonY, buttonWidth, 35);
+    copyBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
 
-    dlg.adjustSize(); // Make the dialog fit its content
+    // Function to populate table with DHCP data
+    auto populateTable = [&]() {
+        table->setRowCount(0);
+        
+        QProcess proc;
+        proc.start("ipconfig", QStringList() << "/all");
+        proc.waitForFinished();
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+        QStringList blocks = output.split(QRegularExpression(R"(\r?\n\r?\n)"), Qt::SkipEmptyParts);
+
+        for (const QString &block : blocks) {
+            if (block.contains("DHCP Enabled", Qt::CaseInsensitive) &&
+                block.contains(": Yes", Qt::CaseInsensitive) &&
+                block.contains("IPv4 Address", Qt::CaseInsensitive)) {
+
+                QStringList lines = block.split('\n', Qt::SkipEmptyParts);
+                QString ifaceName = "Unknown";
+                for (const QString &line : lines) {
+                    if (line.contains(':')) {
+                        ifaceName = line.section(':', 0, 0).trimmed();
+                        break;
+                    }
+                }
+
+                auto extract = [&](const QString &label) -> QString {
+                    QRegularExpression re(label + R"([\s\.]*:[ \t]*([^\r\n]+))");
+                    QRegularExpressionMatch m = re.match(block);
+                    return m.hasMatch() ? m.captured(1).trimmed() : "N/A";
+                };
+
+                QString dhcpServer    = extract("DHCP Server");
+                QString leaseObtained = extract("Lease Obtained");
+                QString leaseExpires  = extract("Lease Expires");
+                QString clientId      = extract("DHCPv4 Client DUID");
+                QString ipv4Address   = extract("IPv4 Address");
+                QString subnetMask    = extract("Subnet Mask");
+                QString defaultGw     = extract("Default Gateway");
+
+                // Add adapter header
+                int row = table->rowCount();
+                table->insertRow(row);
+                
+                QTableWidgetItem *headerItem = new QTableWidgetItem("=== " + ifaceName + " ===");
+                headerItem->setFont(QFont("", -1, QFont::Bold));
+                headerItem->setBackground(QColor("#3498db"));
+                headerItem->setForeground(QColor("white"));
+                table->setItem(row, 0, headerItem);
+                
+                QTableWidgetItem *emptyItem = new QTableWidgetItem("");
+                emptyItem->setBackground(QColor("#3498db"));
+                table->setItem(row, 1, emptyItem);
+
+                // Add DHCP details
+                QStringList properties = {"DHCP Enabled", "IPv4 Address", "Subnet Mask", "Default Gateway", 
+                                        "DHCP Server", "Lease Obtained", "Lease Expires", "DHCP Client ID"};
+                QStringList values = {"Yes", ipv4Address, subnetMask, defaultGw, 
+                                    dhcpServer, leaseObtained, leaseExpires, clientId};
+
+                for (int i = 0; i < properties.size(); ++i) {
+                    int dataRow = table->rowCount();
+                    table->insertRow(dataRow);
+                    
+                    table->setItem(dataRow, 0, new QTableWidgetItem(properties[i]));
+                    
+                    QTableWidgetItem *valueItem = new QTableWidgetItem(values[i]);
+                    // Color code DHCP Enabled
+                    if (properties[i] == "DHCP Enabled") {
+                        valueItem->setBackground(QColor("#d5f4e6"));
+                        valueItem->setForeground(QColor("#27ae60"));
+                    }
+                    table->setItem(dataRow, 1, valueItem);
+                }
+                
+                // Add spacing row
+                int spacingRow = table->rowCount();
+                table->insertRow(spacingRow);
+                table->setItem(spacingRow, 0, new QTableWidgetItem(""));
+                table->setItem(spacingRow, 1, new QTableWidgetItem(""));
+                table->setRowHeight(spacingRow, 10);
+                
+                break; // Only show first DHCP-enabled adapter
+            }
+        }
+        
+        if (table->rowCount() == 0) {
+            int row = table->rowCount();
+            table->insertRow(row);
+            table->setItem(row, 0, new QTableWidgetItem("Status"));
+            QTableWidgetItem *noDataItem = new QTableWidgetItem("No active DHCP-enabled interface found");
+            noDataItem->setBackground(QColor("#fadbd8"));
+            noDataItem->setForeground(QColor("#e74c3c"));
+            table->setItem(row, 1, noDataItem);
+        }
+    };
+
+    // Initial population
+    populateTable();
+
+    // Connect buttons
+    QObject::connect(refreshBtn, &QPushButton::clicked, populateTable);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    
+    QObject::connect(copyBtn, &QPushButton::clicked, [&]() {
+        QString csvData = "Property,Value\n";
+        for (int row = 0; row < table->rowCount(); ++row) {
+            QTableWidgetItem *propItem = table->item(row, 0);
+            QTableWidgetItem *valueItem = table->item(row, 1);
+            if (propItem && valueItem) {
+                QString prop = propItem->text().replace(',', ';');
+                QString value = valueItem->text().replace(',', ';');
+                if (!prop.isEmpty() || !value.isEmpty()) {
+                    csvData += QString("%1,%2\n").arg(prop, value);
+                }
+            }
+        }
+        QApplication::clipboard()->setText(csvData);
+        
+        // Show brief confirmation
+        copyBtn->setText("Copied!");
+        QTimer::singleShot(1500, [copyBtn]() {
+            copyBtn->setText("Copy");
+        });
+    });
+
+    // Ctrl+W shortcut
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
 
     dlg.exec();
 }
 
 void showNslookupDialog(QWidget *parent) {
-    // Custom input dialog with tooltip and custom button text
+
+    // --- Modern dialog with absolute positioning and DPI scaling ---
     QDialog inputDlg(parent);
     inputDlg.setWindowTitle("NS Lookup");
-    QVBoxLayout vbox(&inputDlg);
+    inputDlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
 
-    QLabel prompt("Enter hostname or IP:");
-    vbox.addWidget(&prompt);
+    // DPI scaling
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    int physicalWidth = static_cast<int>(500 / dpiRatio);
+    int physicalHeight = static_cast<int>(300 / dpiRatio); // Increased height for more space
+    inputDlg.setFixedSize(physicalWidth, physicalHeight);
+    inputDlg.resize(physicalWidth, physicalHeight);
 
-    QLineEdit inputEdit;
-    inputEdit.setPlaceholderText("e.g. www.google.com or 8.8.8.8");
-    inputEdit.setToolTip("Enter a hostname (like www.google.com) or an IP address to look up.");
-    vbox.addWidget(&inputEdit);
+    // Modern dialog styling
+    inputDlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
 
-    QHBoxLayout btnBox;
-    QPushButton okBtn("Look it up");
-    okBtn.setToolTip("Start the DNS lookup for the entered hostname or IP.");
-    QPushButton cancelBtn("Close");
-    cancelBtn.setToolTip("Close this dialog.");
-    btnBox.addWidget(&okBtn);
-    btnBox.addWidget(&cancelBtn);
-    vbox.addLayout(&btnBox);
+    QLabel *prompt = new QLabel("Enter hostname or IP:", &inputDlg);
+    prompt->setGeometry(20, 18, physicalWidth-40, 26);
+    prompt->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 11pt; }");
 
-    okBtn.setEnabled(false);
+    QLineEdit *inputEdit = new QLineEdit(&inputDlg);
+    inputEdit->setGeometry(20, 48, physicalWidth-40, 32);
+    inputEdit->setPlaceholderText("e.g. www.google.com or 8.8.8.8");
+    inputEdit->setToolTip("Enter a hostname (like www.google.com) or an IP address to look up.");
+    inputEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 8px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
 
-    QObject::connect(&inputEdit, &QLineEdit::textChanged, [&]() {
-        okBtn.setEnabled(!inputEdit.text().trimmed().isEmpty());
+    // Buttons at bottom, centered
+    // Place buttons just below the input field, with a small gap
+    int buttonY = 48 + 32 + 38 + 20; // input field y + height + larger gap
+    // Ensure buttons are always below the input field with a minimum gap
+    if (buttonY < 130) buttonY = 130;
+    if (buttonY > physicalHeight - 50) buttonY = physicalHeight - 50; // never below bottom
+    int buttonWidth = 90;
+    int buttonSpacing = 16;
+    int totalButtonWidth = (buttonWidth * 2) + buttonSpacing;
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+
+    QPushButton *okBtn = new QPushButton("Look it up", &inputDlg);
+    okBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    okBtn->setToolTip("Start the DNS lookup for the entered hostname or IP.");
+    okBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+
+    QPushButton *cancelBtn = new QPushButton("Close", &inputDlg);
+    cancelBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    cancelBtn->setToolTip("Close this dialog.");
+    cancelBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #23272b; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #181a1b; } "
+        "QPushButton:pressed { background-color: #101112; }"
+    );
+
+    okBtn->setEnabled(false);
+    QObject::connect(inputEdit, &QLineEdit::textChanged, [&]() {
+        okBtn->setEnabled(!inputEdit->text().trimmed().isEmpty());
     });
-    QObject::connect(&okBtn, &QPushButton::clicked, &inputDlg, &QDialog::accept);
-    QObject::connect(&cancelBtn, &QPushButton::clicked, &inputDlg, &QDialog::reject);
+    QObject::connect(okBtn, &QPushButton::clicked, &inputDlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &inputDlg, &QDialog::reject);
 
-    // --- Ctrl+W shortcut to close input dialog ---
-    QShortcut inputCloseShortcut(QKeySequence("Ctrl+W"), &inputDlg);
-    inputCloseShortcut.setContext(Qt::WidgetWithChildrenShortcut);
-    QObject::connect(&inputCloseShortcut, &QShortcut::activated, &inputDlg, &QDialog::reject);
+    // Ctrl+W shortcut
+    QShortcut *inputCloseShortcut = new QShortcut(QKeySequence("Ctrl+W"), &inputDlg);
+    inputCloseShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(inputCloseShortcut, &QShortcut::activated, &inputDlg, &QDialog::reject);
 
-    if (inputDlg.exec() != QDialog::Accepted)
-        return;
+    while (true) {
+        if (inputDlg.exec() != QDialog::Accepted)
+            break;
 
-    QString host = inputEdit.text().trimmed();
-
-    QProcess proc;
-    proc.start("nslookup", QStringList() << host);
-    proc.waitForFinished();
-    QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
-
-    QString server, serverAddr, name;
-    QStringList ipv4List, ipv6List;
-    bool inAnswerSection = false;
-    bool inAddresses = false;
-
-    QStringList lines = output.split('\n', Qt::SkipEmptyParts);
-    QString pendingIPv6;
-
-    for (int i = 0; i < lines.size(); ++i) {
-        QString line = lines[i].trimmed();
-
-        // DNS server info (always at the top)
-        if (line.startsWith("Server:", Qt::CaseInsensitive)) {
-            server = line.section(':', 1).trimmed();
-            inAnswerSection = false;
-            inAddresses = false;
+        QString host = inputEdit->text().trimmed();
+        if (host.isEmpty())
             continue;
-        } else if (line.startsWith("Address:", Qt::CaseInsensitive) && serverAddr.isEmpty()) {
-            serverAddr = line.section(':', 1).trimmed();
-            inAnswerSection = false;
-            inAddresses = false;
-            continue;
-        }
 
-        // Start of answer section
-        if (line.startsWith("Name:", Qt::CaseInsensitive)) {
-            name = line.section(':', 1).trimmed();
-            inAnswerSection = true;
-            inAddresses = false;
-            continue;
-        }
+        QProcess proc;
+        proc.start("nslookup", QStringList() << host);
+        proc.waitForFinished();
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
 
-        if (inAnswerSection) {
-            // Addresses: (plural)
+        QString server, serverAddr, name;
+        QStringList ipv4List, ipv6List;
+
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+
+        // Robust parsing: collect all addresses after 'Addresses:' or 'Address:'
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
+            // DNS server info (always at the top)
+            if (line.startsWith("Server:", Qt::CaseInsensitive)) {
+                server = line.section(':', 1).trimmed();
+                continue;
+            } else if (line.startsWith("Address:", Qt::CaseInsensitive) && serverAddr.isEmpty()) {
+                serverAddr = line.section(':', 1).trimmed();
+                continue;
+            }
+            // Start of answer section
+            if (line.startsWith("Name:", Qt::CaseInsensitive)) {
+                name = line.section(':', 1).trimmed();
+                continue;
+            }
+            // Collect all addresses
             if (line.startsWith("Addresses:", Qt::CaseInsensitive)) {
-                inAddresses = true;
-                // First address may be on same line
                 QString addr = line.section(':', 1).trimmed();
                 if (!addr.isEmpty()) {
-                    if (addr.contains('.'))
-                        ipv4List << addr;
-                    else
-                        ipv6List << addr;
+                    if (addr.contains(':')) ipv6List << addr;
+                    else if (addr.contains('.')) ipv4List << addr;
                 }
-                continue;
-            }
-            // Address: (singular)
-            else if (line.startsWith("Address:", Qt::CaseInsensitive)) {
+                // Collect all following lines until a blank or new section
+                for (int j = i+1; j < lines.size(); ++j) {
+                    QString l2 = lines[j].trimmed();
+                    if (l2.isEmpty() || l2.startsWith("Name:") || l2.startsWith("Server:") || l2.startsWith("Address:")) break;
+                    if (l2.contains(':')) ipv6List << l2;
+                    else if (l2.contains('.')) ipv4List << l2;
+                }
+            } else if (line.startsWith("Address:", Qt::CaseInsensitive)) {
                 QString addr = line.section(':', 1).trimmed();
                 if (!addr.isEmpty()) {
-                    if (addr.contains('.'))
-                        ipv4List << addr;
-                    else
-                        ipv6List << addr;
-                }
-                inAddresses = false;
-                continue;
-            }
-        }
-
-        // Collect addresses, handling split IPv6 lines
-        if (inAddresses) {
-            // Stop if we hit a new key (Name:/Server:/Address:) at the start of a line
-            if (line.startsWith("Name:", Qt::CaseInsensitive) ||
-                line.startsWith("Server:", Qt::CaseInsensitive) ||
-                line.startsWith("Address:", Qt::CaseInsensitive) ||
-                line.startsWith("Addresses:", Qt::CaseInsensitive)) {
-                inAddresses = false;
-                continue;
-            }
-            if (!line.isEmpty()) {
-                // If previous line ended with ":", join with this line (split IPv6)
-                if (!pendingIPv6.isEmpty()) {
-                    QString combined = pendingIPv6 + line;
-                    if (combined.contains('.'))
-                        ipv4List << combined;
-                    else
-                        ipv6List << combined;
-                    pendingIPv6.clear();
-                } else if (line.endsWith(":")) {
-                    pendingIPv6 = line;
-                } else {
-                    if (line.contains('.'))
-                        ipv4List << line;
-                    else
-                        ipv6List << line;
+                    if (addr.contains(':')) ipv6List << addr;
+                    else if (addr.contains('.')) ipv4List << addr;
                 }
             }
         }
-    }
-    // If there is a pending IPv6 part at the end, ignore or add as is
-    if (!pendingIPv6.isEmpty()) {
-        if (pendingIPv6.contains('.'))
-            ipv4List << pendingIPv6;
-        else
-            ipv6List << pendingIPv6;
-    }
 
-    // Compose output in monospace, perfectly aligned style with bold labels
-    QString info = "<pre style='font-family:monospace'>";
-    if (!server.isEmpty())
-        info += QString("<b>Server:</b>    \t%1\n").arg(server);
-    if (!serverAddr.isEmpty())
-        info += QString("<b>Address:</b>   \t%1\n").arg(serverAddr);
-    if (!name.isEmpty())
-        info += QString("<b>Name:</b>      \t%1\n").arg(name);
+        // Compose output in monospace, perfectly aligned style with bold labels
+        QString info = "<pre style='font-family:monospace'>";
+        if (!server.isEmpty())
+            info += QString("<b>Server:</b>    \t%1\n").arg(server);
+        if (!serverAddr.isEmpty())
+            info += QString("<b>Address:</b>   \t%1\n").arg(serverAddr);
+        if (!name.isEmpty())
+            info += QString("<b>Name:</b>      \t%1\n").arg(name);
 
-    if (!ipv4List.isEmpty() || !ipv6List.isEmpty()) {
-        info += "<b>Addresses:</b>  \t";
-        if (!ipv4List.isEmpty()) {
-            info += ipv4List.first() + "\n";
-            for (int i = 1; i < ipv4List.size(); ++i)
-                info += "             \t" + ipv4List[i] + "\n";
-        } else if (!ipv6List.isEmpty()) {
-            info += ipv6List.first() + "\n";
+        if (!ipv4List.isEmpty() || !ipv6List.isEmpty()) {
+            info += "<b>Addresses:</b>  \t";
+            bool first = true;
+            for (const QString &addr : ipv4List) {
+                if (!first) info += "             \t";
+                info += addr + "\n";
+                first = false;
+            }
+            for (const QString &addr : ipv6List) {
+                if (first) { info += addr + "\n"; first = false; }
+                else info += "             \t" + addr + "\n";
+            }
         }
-        int ipv6Start = ipv4List.isEmpty() ? 1 : 0;
-        for (int i = ipv6Start; i < ipv6List.size(); ++i)
-            info += "             \t" + ipv6List[i] + "\n";
+        info += "</pre>";
+
+        // Modern dialog-on-dialog: child of inputDlg, auto-size to fit text
+        QDialog resultDlg(&inputDlg);
+        resultDlg.setWindowTitle("NS Lookup Result");
+        resultDlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+        resultDlg.setModal(true);
+
+        resultDlg.setStyleSheet(
+            "QDialog { "
+            "    background-color: #f8f9fa; "
+            "    border: 2px solid #34495e; "
+            "    border-radius: 8px; "
+            "}"
+        );
+
+        QLabel *resultLabel = new QLabel(&resultDlg);
+        resultLabel->setText(info);
+        resultLabel->setTextFormat(Qt::RichText);
+        resultLabel->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+        resultLabel->setStyleSheet("QLabel { color: #34495e; font-size: 10pt; font-weight: normal; background: transparent; }");
+        resultLabel->adjustSize();
+
+        int dlgW = qMax(420, resultLabel->width() + 36);
+        int dlgH = qMax(180, resultLabel->height() + 80);
+        resultDlg.setFixedSize(dlgW, dlgH);
+
+        resultLabel->setGeometry(18, 18, dlgW-36, dlgH-80);
+
+        int resultButtonWidth = 90;
+        int resultButtonY = dlgH - 48;
+        int resultButtonX = (dlgW - resultButtonWidth) / 2;
+        QPushButton *resultCloseBtn = new QPushButton("Close", &resultDlg);
+        resultCloseBtn->setGeometry(resultButtonX, resultButtonY, resultButtonWidth, 32);
+        resultCloseBtn->setToolTip("Close this dialog");
+        resultCloseBtn->setStyleSheet(
+            "QPushButton { "
+            "    background-color: #23272b; "
+            "    color: white; "
+            "    border: none; "
+            "    border-radius: 5px; "
+            "    font-weight: bold; "
+            "    font-size: 10pt; "
+            "} "
+            "QPushButton:hover { background-color: #181a1b; } "
+            "QPushButton:pressed { background-color: #101112; }"
+        );
+        QObject::connect(resultCloseBtn, &QPushButton::clicked, &resultDlg, &QDialog::accept);
+
+        // Ctrl+W shortcut
+        QShortcut *resultCloseShortcut = new QShortcut(QKeySequence("Ctrl+W"), &resultDlg);
+        resultCloseShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        QObject::connect(resultCloseShortcut, &QShortcut::activated, &resultDlg, &QDialog::accept);
+
+        resultDlg.exec();
     }
-    info += "</pre>";
-
-    // Create dialog with NO parent to ensure no X button
-    QDialog dlg(nullptr);
-    dlg.setWindowTitle("NS Lookup Result");
-    dlg.setWindowFlags(Qt::CustomizeWindowHint | Qt::WindowTitleHint);
-    dlg.setModal(true);
-
-    QVBoxLayout layout(&dlg);
-
-    QLabel *label = new QLabel(info);
-    label->setTextFormat(Qt::RichText);
-    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout.addWidget(label);
-
-    QPushButton *closeBtn = new QPushButton("Close");
-    closeBtn->setToolTip("Close this dialog");
-    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout.addWidget(closeBtn);
-
-    // --- Ctrl+W shortcut to close dialog ---
-    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
-    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
-
-    dlg.adjustSize();
-    dlg.exec();
 }
 
 void showArpDialog(QWidget *parent = nullptr) {
     QDialog dlg(parent);
     dlg.setWindowTitle("ARP Table");
     addCtrlWClose(&dlg);
+    
+    // Apply modern styling to dialog
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
     // --- Remove arp entries section (moved up) ---
     QHBoxLayout *delLayout = new QHBoxLayout();
     QLabel *removeLabel = new QLabel("Remove arp entries:");
+    removeLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QLineEdit *ipEdit = new QLineEdit("*");
     ipEdit->setPlaceholderText("IP to delete (e.g. 192.168.1.1 or * for all)");
+    ipEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
+    
     QPushButton *delBtn = new QPushButton("Delete");
+    delBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
+    );
+    
     delLayout->addWidget(removeLabel);
     delLayout->addWidget(ipEdit);
     delLayout->addWidget(delBtn);
@@ -1873,14 +2659,84 @@ void showArpDialog(QWidget *parent = nullptr) {
     table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     table->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     table->setMaximumHeight(600);
+    
+    // Modern table styling matching Traceroute
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "    font-size: 10pt; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "}"
+    );
+    
     layout->addWidget(table);
 
     // --- Advanced/Refresh/Close buttons centered at bottom ---
     QHBoxLayout *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
     QPushButton *advBtn = new QPushButton("Advanced");
+    advBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
+    
     QPushButton *refreshBtn = new QPushButton("Refresh");
+    refreshBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #23272b; " // much darker
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #181a1b; } "
+        "QPushButton:pressed { background-color: #101112; }"
+    );
+    
     btnLayout->addWidget(advBtn);
     btnLayout->addWidget(refreshBtn);
     btnLayout->addWidget(closeBtn);
@@ -1981,6 +2837,13 @@ void showArpDialog(QWidget *parent = nullptr) {
 void showWifiScanDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("WiFi Networks");
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
     addCtrlWClose(&dlg);
     dlg.setFixedWidth(650);
 
@@ -1990,14 +2853,23 @@ void showWifiScanDialog(QWidget *parent) {
     msgLabel->setWordWrap(true);
     msgLabel->setAlignment(Qt::AlignCenter);
     QFont msgFont = msgLabel->font();
-    msgFont.setBold(false);
+    msgFont.setBold(true);
     msgFont.setPointSize(11);
     msgLabel->setFont(msgFont);
-    msgLabel->setStyleSheet("color:#1e90ff;");
+    msgLabel->setStyleSheet(
+        "QLabel { "
+        "    color: #e67e22; "
+        "    background-color: #fdf2e9; "
+        "    border: 2px solid #f39c12; "
+        "    border-radius: 6px; "
+        "    padding: 8px; "
+        "}"
+    );
     msgLabel->setVisible(false);
     layout->addWidget(msgLabel);
 
     QLabel *info = new QLabel("Nearby WiFi networks (signal in dBm):");
+    info->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 11pt; }");
     layout->addWidget(info);
 
     QTableWidget *table = new QTableWidget();
@@ -2011,6 +2883,33 @@ void showWifiScanDialog(QWidget *parent) {
     table->setMaximumWidth(630);
     table->setMinimumWidth(630);
     table->setFixedWidth(630);
+
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "    font-size: 10pt; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "}"
+    );
 
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
 
@@ -2026,7 +2925,35 @@ void showWifiScanDialog(QWidget *parent) {
     layout->addWidget(table);
 
     QPushButton *refreshBtn = new QPushButton("Refresh");
+    refreshBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #95a5a6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #7f8c8d; } "
+        "QPushButton:pressed { background-color: #6c7b7d; }"
+    );
+    
     QHBoxLayout *btnLayout = new QHBoxLayout();
     btnLayout->addStretch();
     btnLayout->addWidget(refreshBtn);
@@ -2221,8 +3148,15 @@ void showWifiScanDialog(QWidget *parent) {
 void showNetUsageDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Network usage");
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
     addCtrlWClose(&dlg);
-    dlg.setFixedSize(420, 170);
+    dlg.setMinimumWidth(420);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
     layout->setContentsMargins(8, 8, 8, 8);
@@ -2235,7 +3169,15 @@ void showNetUsageDialog(QWidget *parent) {
 
     QLabel *usageLabel = new QLabel("Network usage");
     usageLabel->setAlignment(Qt::AlignCenter);
-    usageLabel->setStyleSheet("font-weight:bold; font-size:12pt; padding-bottom:0px; margin-bottom:0px;");
+    usageLabel->setStyleSheet(
+        "QLabel { "
+        "    color: #34495e; "
+        "    font-weight: bold; "
+        "    font-size: 13pt; "
+        "    padding-bottom: 4px; "
+        "    margin-bottom: 0px; "
+        "}"
+    );
     timersLayout->addWidget(usageLabel);
 
     timersWidget->setLayout(timersLayout);
@@ -2249,6 +3191,7 @@ void showNetUsageDialog(QWidget *parent) {
 
     // Table: 2 rows, 3 columns (Received, Sent, Uptime)
     QTableWidget *table = new QTableWidget(2, 3);
+    // Add the table directly to the main layout
     table->setVerticalHeaderLabels(QStringList() << "Total" << "Trip Counter");
     table->setHorizontalHeaderLabels(QStringList() << "Received" << "Sent" << "Uptime");
     QFont boldFont = table->horizontalHeader()->font();
@@ -2262,18 +3205,73 @@ void showNetUsageDialog(QWidget *parent) {
     table->setSelectionMode(QAbstractItemView::NoSelection);
     table->setFocusPolicy(Qt::NoFocus);
     table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    table->setFixedHeight(104); // Force table to only take up space for two rows
+    table->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    table->setFixedHeight(80);
-    table->setFixedWidth(400);
+    table->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "    font-size: 9pt; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 4px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 6px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "    font-size: 9pt; "
+        "}"
+    );
     layout->addWidget(table);
 
-    // Buttons side by side
+    // Set extra margin below the table to ensure a visible gap
+    layout->setSpacing(0);
+    layout->setSpacing(8);
+    layout->setContentsMargins(10, 10, 10, 10); // Restore bottom margin to default
+
+    // Buttons below the spacer
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *resetTripBtn = new QPushButton("Reset Trip Counter");
     resetTripBtn->setToolTip("Reset the trip counter to zero.\nUse this to measure network usage for a specific task.");
+    resetTripBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e67e22; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 6px 12px; "
+        "    font-size: 9pt; "
+        "} "
+        "QPushButton:hover { background-color: #d35400; } "
+        "QPushButton:pressed { background-color: #ba4a00; }"
+    );
     QPushButton *closeBtn = new QPushButton("Close");
     closeBtn->setToolTip("Close this dialog");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #95a5a6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 6px 12px; "
+        "    font-size: 9pt; "
+        "} "
+        "QPushButton:hover { background-color: #7f8c8d; } "
+        "QPushButton:pressed { background-color: #6c7b7d; }"
+    );
     btnLayout->addStretch();
     btnLayout->addWidget(resetTripBtn);
     btnLayout->addWidget(closeBtn);
@@ -2528,6 +3526,13 @@ void showNetUsageDialog(QWidget *parent) {
 void showNetworkAdaptersDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("Network Adapters");
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
     addCtrlWClose(&dlg);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
@@ -2549,6 +3554,34 @@ void showNetworkAdaptersDialog(QWidget *parent) {
     table->setSelectionMode(QAbstractItemView::NoSelection);
     table->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
     table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "    font-size: 10pt; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "}"
+    );
+    
     layout->addWidget(table);
 
     // Make header bold
@@ -2559,8 +3592,36 @@ void showNetworkAdaptersDialog(QWidget *parent) {
     QHBoxLayout *btnLayout = new QHBoxLayout();
     QPushButton *rescanBtn = new QPushButton("Rescan");
     rescanBtn->setToolTip("Manually rescan the network adapters");
+    rescanBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    
     QPushButton *closeBtn = new QPushButton("Close");
-    closeBtn->setToolTip("Close the dialog");   
+    closeBtn->setToolTip("Close the dialog");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #95a5a6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #7f8c8d; } "
+        "QPushButton:pressed { background-color: #6c7b7d; }"
+    );
+    
     btnLayout->addStretch();
     btnLayout->addWidget(rescanBtn);
     btnLayout->addWidget(closeBtn);
@@ -2702,254 +3763,44 @@ void showNetworkAdaptersDialog(QWidget *parent) {
     dlg.exec();
 }
 
-void showSslCertificateDialog(QWidget *parent) {
-    QDialog dlg(parent);
-    dlg.setWindowTitle("SSL Certificate Check");
-    dlg.setMinimumWidth(600);
-    dlg.setMaximumWidth(950);
 
-    QVBoxLayout *layout = new QVBoxLayout(&dlg);
-
-    QLabel *hostLabel = new QLabel("Host (e.g. www.google.com):");
-    QLineEdit *hostEdit = new QLineEdit;
-    hostEdit->setPlaceholderText("e.g. www.google.com");
-    QLabel *portLabel = new QLabel("Port:");
-    QLineEdit *portEdit = new QLineEdit("443");
-    portEdit->setValidator(new QIntValidator(1, 65535, portEdit));
-    layout->addWidget(hostLabel);
-    layout->addWidget(hostEdit);
-    layout->addWidget(portLabel);
-    layout->addWidget(portEdit);
-
-    QTextEdit *output = new QTextEdit;
-    output->setReadOnly(true);
-    output->setMinimumHeight(40);
-    output->setMaximumHeight(80);
-    output->setVisible(false);
-    layout->addWidget(output);
-
-    QScrollArea *scrollArea = new QScrollArea;
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setMinimumHeight(250);
-    scrollArea->setMaximumHeight(250);
-    scrollArea->setMinimumWidth(580);
-    scrollArea->setMaximumWidth(930);
-
-    QWidget *certsWidget = new QWidget;
-    certsWidget->setMinimumWidth(560);
-    certsWidget->setMaximumWidth(900);
-    QVBoxLayout *certsLayout = new QVBoxLayout(certsWidget);
-    certsLayout->setAlignment(Qt::AlignTop);
-    scrollArea->setWidget(certsWidget);
-    layout->addWidget(scrollArea);
-
-    QPushButton *checkBtn = new QPushButton("Check");
-    QPushButton *closeBtn = new QPushButton("Close");
-    QHBoxLayout *btnLayout = new QHBoxLayout;
-    btnLayout->addStretch();
-    btnLayout->addWidget(checkBtn);
-    btnLayout->addWidget(closeBtn);
-    btnLayout->addStretch();
-    layout->addLayout(btnLayout);
-
-    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
-    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::reject);
-    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
-
-    auto certInStore = [](const QByteArray &sha1, QString &storeOut) -> bool {
-        QStringList stores = { "Root", "CA" };
-        for (const QString &store : stores) {
-            QProcess proc;
-            proc.start("powershell", QStringList()
-                << "-Command"
-                << QString("Get-ChildItem -Path Cert:\\LocalMachine\\%1 | Where-Object { $_.Thumbprint -eq '%2' } | Select-Object -First 1 -ExpandProperty Thumbprint")
-                    .arg(store, QString::fromLatin1(sha1.toHex().toUpper())));
-            proc.waitForFinished(2000);
-            QString thumb = proc.readAllStandardOutput().trimmed();
-            if (!thumb.isEmpty()) {
-                storeOut = store;
-                return true;
-            }
-        }
-        storeOut.clear();
-        return false;
-    };
-
-    auto doCheck = [&]() {
-        QString host = hostEdit->text().trimmed();
-        int port = portEdit->text().toInt();
-        if (host.isEmpty() || port < 1 || port > 65535) {
-            output->setVisible(true);
-            output->setPlainText("Please enter a valid host and port.");
-            return;
-        }
-        output->clear();
-        output->setVisible(false);
-
-        // Remove previous cert widgets
-        QLayoutItem *item;
-        while ((item = certsLayout->takeAt(0)) != nullptr) {
-            if (item->widget()) item->widget()->deleteLater();
-            delete item;
-        }
-
-        // --- Show scanning dialog with minimum display time ---
-        QDialog workingDlg(&dlg);
-        workingDlg.setWindowTitle("Querying, please wait.");
-        workingDlg.setFixedSize(320, 180);
-        workingDlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint);
-        QVBoxLayout vbox(&workingDlg);
-        QLabel label("Querying, please wait.");
-        label.setAlignment(Qt::AlignCenter);
-        vbox.addWidget(&label);
-        QLabel animLabel;
-        animLabel.setFixedSize(96, 96);
-        animLabel.setScaledContents(true);
-        QMovie movie("StdWorking.gif");
-        animLabel.setMovie(&movie);
-        vbox.addWidget(&animLabel, 0, Qt::AlignHCenter);
-        movie.start();
-        workingDlg.setModal(true);
-        workingDlg.show();
-        QCoreApplication::processEvents();
-        QElapsedTimer timer;
-        timer.start();
-
-        // --- Network operation ---
-        QSslSocket socket;
-        socket.connectToHostEncrypted(host, port);
-        bool ok = socket.waitForEncrypted(5000);
-
-        int elapsed = int(timer.elapsed());
-        if (elapsed < 300)
-            QThread::msleep(300 - elapsed);
-
-        workingDlg.accept();
-
-        if (!ok) {
-            output->setVisible(true);
-            output->setPlainText("Could not connect or handshake failed:\n" + socket.errorString());
-            return;
-        }
-        QList<QSslCertificate> certs = socket.peerCertificateChain();
-        if (certs.isEmpty()) {
-            output->setVisible(true);
-            output->setPlainText("No certificate received.");
-            return;
-        }
-
-        struct CertInfo {
-            QSslCertificate cert;
-            QByteArray sha1;
-            QString store;
-            bool inStore;
-        };
-        QList<CertInfo> certList;
-        for (const QSslCertificate &cert : certs) {
-            QByteArray sha1 = cert.digest(QCryptographicHash::Sha1);
-            QString store;
-            bool inStore = certInStore(sha1, store);
-            certList.append(CertInfo{cert, sha1, store, inStore});
-        }
-        std::sort(certList.begin(), certList.end(), [](const CertInfo &a, const CertInfo &b) {
-            return a.inStore > b.inStore;
-        });
-
-        int idx = 1;
-        for (const CertInfo &ci : certList) {
-            QWidget *certWidget = new QWidget;
-            certWidget->setMinimumWidth(560);
-            certWidget->setMaximumWidth(900);
-            QVBoxLayout *certLayout = new QVBoxLayout(certWidget);
-            certLayout->setContentsMargins(8, 8, 8, 8);
-
-            // Use plain text for cert info
-            QString info;
-            info += QString("Certificate #%1\n").arg(idx++);
-            info += QString("Subject:    %1\n").arg(ci.cert.subjectInfo(QSslCertificate::CommonName).join(", "));
-            info += QString("Issuer:     %1\n").arg(ci.cert.issuerInfo(QSslCertificate::CommonName).join(", "));
-            info += QString("Valid from: %1\n").arg(ci.cert.effectiveDate().toString());
-            info += QString("Valid to:   %1\n").arg(ci.cert.expiryDate().toString());
-            info += QString("Serial:     %1\n").arg(ci.cert.serialNumber());
-            info += QString("SHA1:       %1\n").arg(QString::fromLatin1(ci.sha1.toHex()));
-            if (ci.inStore)
-                info += QString("Store:      [Found in Windows certificate store: %1]\n").arg(ci.store);
-            else
-                info += "Store:      [Not found in Windows certificate store]\n";
-
-            QPlainTextEdit *infoEdit = new QPlainTextEdit(info);
-            infoEdit->setReadOnly(true);
-            infoEdit->setFrameStyle(QFrame::NoFrame);
-            infoEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            infoEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            infoEdit->setMinimumWidth(540);
-            infoEdit->setMaximumWidth(880);
-            infoEdit->setFixedHeight(infoEdit->fontMetrics().height() * (info.count('\n') + 2));
-            infoEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            certLayout->addWidget(infoEdit);
-
-            if (ci.inStore) {
-                QPushButton *removeBtn = new QPushButton("Remove");
-                removeBtn->setProperty("sha1", QString::fromLatin1(ci.sha1.toHex().toUpper()));
-                removeBtn->setProperty("store", ci.store);
-                removeBtn->setProperty("host", host);
-                QObject::connect(removeBtn, &QPushButton::clicked, [=, &dlg, &checkBtn]() {
-                    QString sha1 = removeBtn->property("sha1").toString();
-                    QString store = removeBtn->property("store").toString();
-                    QString hostVal = removeBtn->property("host").toString();
-                    QMessageBox msgBox(&dlg);
-                    msgBox.setWindowTitle("Remove Certificate");
-                    msgBox.setText(QString("Are you sure you want to remove the cert for [%1]?").arg(hostVal));
-                    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
-                    msgBox.setDefaultButton(QMessageBox::Cancel);
-                    int ret = msgBox.exec();
-                    if (ret == QMessageBox::Yes) {
-                        QString psCmd = QString(
-                            "Remove-Item -Path Cert:\\LocalMachine\\%1\\%2 -Force"
-                        ).arg(store, sha1);
-                        int result = QProcess::execute("powershell", QStringList() << "-Command" << psCmd);
-                        if (result == 0) {
-                            QMessageBox::information(&dlg, "Certificate Removed", "Certificate removed from store.");
-                            checkBtn->click(); // Refresh
-                        } else {
-                            QMessageBox::warning(&dlg, "Failed", "Failed to remove certificate.");
-                        }
-                    }
-                });
-                certLayout->addWidget(removeBtn, 0, Qt::AlignLeft);
-
-                QLabel *spacer = new QLabel;
-                spacer->setFixedHeight(8);
-                certLayout->addWidget(spacer);
-            }
-
-            certsLayout->addWidget(certWidget);
-        }
-        certsLayout->addStretch();
-    };
-
-    QObject::connect(checkBtn, &QPushButton::clicked, doCheck);
-    QObject::connect(hostEdit, &QLineEdit::returnPressed, doCheck);
-    QObject::connect(portEdit, &QLineEdit::returnPressed, doCheck);
-
-    dlg.exec();
-}
 
 void showMtuDiscoveryDialog(QWidget *parent) {
     QDialog dlg(parent);
     dlg.setWindowTitle("MTU Discovery");
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
     addCtrlWClose(&dlg);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
     QLabel *prompt = new QLabel("Find the optimal MTU for your connection (largest packet size without fragmentation):");
+    prompt->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 11pt; }");
     layout->addWidget(prompt);
 
     // Host input
     QHBoxLayout *hostLayout = new QHBoxLayout();
     QLabel *hostLabel = new QLabel("Host:");
-    QLineEdit *hostEdit = new QLineEdit("8.8.8.8");
-    hostEdit->setToolTip("Enter the host to ping (default: 8.8.8.8)");
+    hostLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
+    QLineEdit *hostEdit = new QLineEdit();
+    hostEdit->setPlaceholderText("e.g. 8.8.8.8 or vg.no");
+    hostEdit->setToolTip("Enter the host to ping.\nExamples: 8.8.8.8 (Google DNS), vg.no (Norwegian news), or your router IP.");
+    hostEdit->setStyleSheet(
+        "QLineEdit { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    font-size: 10pt; "
+        "} "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
+    
     hostLayout->addWidget(hostLabel);
     hostLayout->addWidget(hostEdit);
     layout->addLayout(hostLayout);
@@ -2957,17 +3808,53 @@ void showMtuDiscoveryDialog(QWidget *parent) {
     // Range and step input
     QHBoxLayout *rangeLayout = new QHBoxLayout();
     QLabel *minLabel = new QLabel("Min size:");
+    minLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QSpinBox *minSpin = new QSpinBox;
     minSpin->setRange(12, 2000);
     minSpin->setValue(1200);
+    minSpin->setStyleSheet(
+        "QSpinBox { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QSpinBox:focus { border-color: #2980b9; }"
+    );
+    
     QLabel *maxLabel = new QLabel("Max size:");
+    maxLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QSpinBox *maxSpin = new QSpinBox;
     maxSpin->setRange(12, 2000);
     maxSpin->setValue(1500);
+    maxSpin->setStyleSheet(
+        "QSpinBox { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QSpinBox:focus { border-color: #2980b9; }"
+    );
+    
     QLabel *stepLabel = new QLabel("Step:");
+    stepLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QSpinBox *stepSpin = new QSpinBox;
     stepSpin->setRange(1, 200);
     stepSpin->setValue(10);
+    stepSpin->setStyleSheet(
+        "QSpinBox { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QSpinBox:focus { border-color: #2980b9; }"
+    );
+    
     rangeLayout->addWidget(minLabel);
     rangeLayout->addWidget(minSpin);
     rangeLayout->addSpacing(10);
@@ -2982,13 +3869,37 @@ void showMtuDiscoveryDialog(QWidget *parent) {
     QTextEdit *output = new QTextEdit;
     output->setReadOnly(true);
     output->setMinimumHeight(120);
+    output->setStyleSheet(
+        "QTextEdit { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    font-family: 'Consolas', 'Courier New', monospace; "
+        "    font-size: 9pt; "
+        "    padding: 6px; "
+        "}"
+    );
     layout->addWidget(output);
 
     // --- Interface and MTU setting controls ---
     QHBoxLayout *mtuLayout = new QHBoxLayout();
     QLabel *ifaceLabel = new QLabel("Interface:");
+    ifaceLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QComboBox *ifaceCombo = new QComboBox;
+    ifaceCombo->setStyleSheet(
+        "QComboBox { "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 4px; "
+        "    font-size: 10pt; "
+        "} "
+        "QComboBox:focus { border-color: #2980b9; }"
+    );
+    
     QLabel *mtuLabel = new QLabel("Set MTU:");
+    mtuLabel->setStyleSheet("QLabel { color: #34495e; font-weight: bold; font-size: 10pt; }");
+    
     QSpinBox *mtuSpin = new QSpinBox;
     mtuSpin->setRange(576, 2000);
     mtuSpin->setValue(1500);
@@ -3001,14 +3912,36 @@ void showMtuDiscoveryDialog(QWidget *parent) {
     mtuLayout->addWidget(setMtuBtn);
     layout->addLayout(mtuLayout);
 
-    // Buttons
+    // Buttons (modern ARP/Traceroute style)
     QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
     QPushButton *startBtn = new QPushButton("Start Scan");
-    QPushButton *stopBtn = new QPushButton("Stop");
-    QPushButton *closeBtn = new QPushButton("Close");
+    startBtn->setToolTip("Begin scanning for the optimal MTU.");
+    startBtn->setStyleSheet(
+        "QPushButton { background-color: #27ae60; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
     btnLayout->addWidget(startBtn);
+    btnLayout->addSpacing(10);
+    QPushButton *stopBtn = new QPushButton("Stop");
+    stopBtn->setToolTip("Stop the scan in progress.");
+    stopBtn->setStyleSheet(
+        "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
+    );
     btnLayout->addWidget(stopBtn);
+    btnLayout->addSpacing(10);
+    QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close this dialog.");
+    closeBtn->setStyleSheet(
+        "QPushButton { background-color: #34495e; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
     btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
     layout->addLayout(btnLayout);
 
     stopBtn->setEnabled(false);
@@ -3068,7 +4001,7 @@ void showMtuDiscoveryDialog(QWidget *parent) {
         timer->stop();
     });
 
-    QObject::connect(startBtn, &QPushButton::clicked, [&]() mutable {
+    auto startScan = [&]() mutable {
         QObject::disconnect(timer.get(), &QTimer::timeout, nullptr, nullptr);
 
         QString host = hostEdit->text().trimmed();
@@ -3151,7 +4084,9 @@ void showMtuDiscoveryDialog(QWidget *parent) {
         QObject::connect(timer.get(), &QTimer::timeout, [=]() { (*tryNextPtr)(); });
 
         (*tryNextPtr)();
-    });
+    };
+    QObject::connect(startBtn, &QPushButton::clicked, startScan);
+    QObject::connect(hostEdit, &QLineEdit::returnPressed, startScan);
 
     // --- Set MTU Button ---
     QObject::connect(setMtuBtn, &QPushButton::clicked, [&]() {
@@ -3215,6 +4150,7 @@ void showMtuDiscoveryDialog(QWidget *parent) {
 
 
 void showHostsFileEditor(QWidget *parent) {
+    // DPI-AWARE HOSTS FILE EDITOR - Modern styling like traceroute and DNS cache
     const QString hostsPath = "C:/Windows/System32/drivers/etc/hosts";
     const QString backupDir = "C:/Users/Public/AppData/Local/IPGui";
     const QString backupPath = backupDir + "/hosts.bak";
@@ -3223,26 +4159,117 @@ void showHostsFileEditor(QWidget *parent) {
 
     QDialog dlg(parent);
     dlg.setWindowTitle("Hosts File Editor");
-    dlg.resize(700, 500);
-
-    QVBoxLayout *layout = new QVBoxLayout(&dlg);
-
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling
+    int physicalWidth = static_cast<int>(1300 / dpiRatio);
+    int physicalHeight = static_cast<int>(700 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
     QLabel *hint = new QLabel(
         "<b>Windows Hosts File Editor</b><br>"
-        "Each line: <code>IP_address hostname [# comment]</code><br>"
-        "Examples:<br>"
-        "<code>127.0.0.1   localhost</code><br>"
-        "<code>192.168.1.10   myserver.local # test server</code><br>"
-        "<span style='color:gray;'>Lines starting with # are comments. Blank lines are ignored.</span>"
-    );
+        "<span style='color:#7f8c8d;'>Edit the system hosts file. Changes require administrator rights.</span>", &dlg);
     hint->setTextFormat(Qt::RichText);
-    layout->addWidget(hint);
+    hint->setGeometry(10, 10, physicalWidth-20, 40);
+    hint->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 10pt; background-color: #ecf0f1; border: 1px solid #bdc3c7; border-radius: 4px; padding: 8px; }");
 
-    QPlainTextEdit *editor = new QPlainTextEdit;
+    // Modern text editor with DPI-corrected size
+    QPlainTextEdit *editor = new QPlainTextEdit(&dlg);
     QFont mono("Consolas");
     mono.setStyleHint(QFont::Monospace);
+    mono.setPointSize(10);
     editor->setFont(mono);
-    layout->addWidget(editor, 1);
+    
+    // Position editor with proper DPI-corrected dimensions
+    int editorWidth = physicalWidth - 20;
+    int editorHeight = physicalHeight - 140; // Leave space for smaller header and buttons
+    editor->setGeometry(10, 60, editorWidth, editorHeight);
+    
+    // Modern editor styling
+    editor->setStyleSheet(
+        "QPlainTextEdit { "
+        "    background-color: #ffffff; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    color: #2c3e50; "
+        "    selection-background-color: #3498db; "
+        "    selection-color: white; "
+        "    padding: 8px; "
+        "}"
+    );
+
+    // Modern buttons positioned at bottom - centered
+    int buttonY = physicalHeight - 45;
+    int buttonWidth = 120;
+    int buttonSpacing = 15;
+    int totalButtonWidth = (buttonWidth * 3) + (buttonSpacing * 2);
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+    
+    QPushButton *saveBtn = new QPushButton("Save", &dlg);
+    saveBtn->setToolTip("Save changes to hosts file (requires admin rights).");
+    saveBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    saveBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
+    QPushButton *restoreBtn = new QPushButton("Restore Backup", &dlg);
+    restoreBtn->setToolTip("Restore hosts file from backup.");
+    restoreBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    restoreBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #f39c12; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #e67e22; } "
+        "QPushButton:pressed { background-color: #d35400; }"
+    );
+    
+    QPushButton *closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setToolTip("Close the hosts file editor.");
+    closeBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 2, buttonY, buttonWidth, 35);
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
 
     // Load hosts file
     QString originalText;
@@ -3377,16 +4404,6 @@ void showHostsFileEditor(QWidget *parent) {
         QMessageBox::critical(&dlg, "Restore Backup", "Failed to restore backup, even with elevation.");
         loadHosts(); // Always reload to show the real file
     };
-
-    // Buttons
-    QHBoxLayout *btnLayout = new QHBoxLayout();
-    QPushButton *saveBtn = new QPushButton("Save");
-    QPushButton *restoreBtn = new QPushButton("Restore Backup");
-    QPushButton *closeBtn = new QPushButton("Close");
-    btnLayout->addWidget(saveBtn);
-    btnLayout->addWidget(restoreBtn);
-    btnLayout->addWidget(closeBtn);
-    layout->addLayout(btnLayout);
 
     loadHosts();
 
@@ -3671,9 +4688,28 @@ void showNetstatStatisticsDialog(QWidget *parent) {
     legend->setTextFormat(Qt::RichText);
     layout->addWidget(legend);
 
+
+    // Centered Close button with special style
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->setAlignment(Qt::AlignCenter);
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close this dialog");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #3c5872; } "
+        "QPushButton:pressed { background-color: #22313a; }"
+    );
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout->addWidget(closeBtn);
+    btnLayout->addWidget(closeBtn);
+    layout->addLayout(btnLayout);
 
     dlg.adjustSize();
     dlg.exec();
@@ -3681,9 +4717,14 @@ void showNetstatStatisticsDialog(QWidget *parent) {
 
 
 void showRouteTableDialog(QWidget *parent) {
+    // DPI-aware sizing
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen ? screen->devicePixelRatio() : 1.0;
+    int dialogWidth = static_cast<int>(1250 / dpiRatio);
+    int dialogHeight = static_cast<int>(1000 / dpiRatio);
     QDialog dlg(parent);
     dlg.setWindowTitle("Route Table Viewer/Editor");
-    dlg.setMinimumWidth(900);
+    dlg.resize(dialogWidth, dialogHeight);
     addCtrlWClose(&dlg);
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
@@ -3711,32 +4752,43 @@ void showRouteTableDialog(QWidget *parent) {
 
     // IPv6 columns
     QStringList ipv6Headers = {
-        "If", "Metric", "Destination", "Gateway", "Action"
+        "Destination", "Metric", "If", "Gateway", "Action"
     };
     QStringList ipv6Tips = {
-        "Interface index.\n(Technical: Windows adapter index for this route.)",
-        "Route metric (priority).\n(Technical: Lower is preferred.)",
         "Destination IPv6 network/prefix.\n(Technical: Network address in CIDR notation.)",
+        "Route metric (priority).\n(Technical: Lower is preferred.)",
+        "Interface index.\n(Technical: Windows adapter index for this route.)",
         "Gateway IPv6 address or On-link.\n(Technical: Next hop for this route.)",
         "Delete this route."
     };
 
-    auto createTable = [&](const QStringList &headers, const QStringList &tips) -> QTableWidget* {
+    auto createTable = [&](const QStringList &headers, const QStringList &tips, int actionCol) -> QTableWidget* {
         QTableWidget *table = new QTableWidget();
         table->setColumnCount(headers.size());
         table->setHorizontalHeaderLabels(headers);
-        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        for (int i = 0; i < headers.size(); ++i) {
+            if (i == actionCol) {
+                table->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+            } else {
+                table->horizontalHeader()->setSectionResizeMode(i, QHeaderView::Stretch);
+            }
+            table->horizontalHeaderItem(i)->setToolTip(tips[i]);
+        }
         table->verticalHeader()->setVisible(false);
         table->setEditTriggers(QAbstractItemView::NoEditTriggers);
         table->setSelectionMode(QAbstractItemView::SingleSelection);
         table->setFocusPolicy(Qt::NoFocus);
-        for (int i = 0; i < headers.size(); ++i)
-            table->horizontalHeaderItem(i)->setToolTip(tips[i]);
+        table->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        table->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        // Prevent eliding (truncation) in cells
+        table->horizontalHeader()->setMinimumSectionSize(80);
+        table->setWordWrap(false);
         return table;
     };
 
-    QTableWidget *ipv4Table = createTable(ipv4Headers, ipv4Tips);
-    QTableWidget *ipv6Table = createTable(ipv6Headers, ipv6Tips);
+    QTableWidget *ipv4Table = createTable(ipv4Headers, ipv4Tips, 5); // Action column is 5
+    QTableWidget *ipv6Table = createTable(ipv6Headers, ipv6Tips, 4); // Action column is 4
 
     QBrush blue(QColor("#1c2684"));
     QBrush green(QColor("#1a7d2c"));
@@ -3747,6 +4799,8 @@ void showRouteTableDialog(QWidget *parent) {
     std::function<void(QTableWidget*)> fillIPv4Table;
     fillIPv4Table = [&](QTableWidget *table) {
         table->setRowCount(0);
+        // Set horizontal scroll mode for IP columns
+        table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         QProcess proc;
         proc.start("route", QStringList() << "print");
         proc.waitForFinished(2000);
@@ -3776,20 +4830,43 @@ void showRouteTableDialog(QWidget *parent) {
                 for (int col = 0; col < 5; ++col) {
                     QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
                     item->setForeground(col == 0 ? blue : (col == 2 ? green : gray));
-                    item->setToolTip(ipv4Tips[col]);
+                    // Show full IP in tooltip for IP columns (0: Destination, 2: Gateway, 3: Interface)
+                    if (col == 0 || col == 2 || col == 3) {
+                        item->setToolTip(parts[col]);
+                    } else {
+                        item->setToolTip(ipv4Tips[col]);
+                    }
                     item->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    // Prevent eliding
+                    item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
                     table->setItem(row, col, item);
                 }
                 // Add Delete button
                 QPushButton *delBtn = new QPushButton("Delete");
                 delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> mask <netmask> <gateway>)");
+                delBtn->setStyleSheet(
+                    "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 16px; min-width: 80px; min-height: 32px; font-size: 10.5pt; } "
+                    "QPushButton:hover { background-color: #c0392b; } "
+                    "QPushButton:pressed { background-color: #a93226; }"
+                );
                 table->setCellWidget(row, 5, delBtn);
                 QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
                     QString dest = parts[0], mask = parts[1], gw = parts[2];
-                    int ret = QMessageBox::question(&dlg, "Delete Route",
-                        QString("Are you sure you want to delete this route?\n\n"
-                                "Destination: %1\nNetmask: %2\nGateway: %3").arg(dest, mask, gw),
-                        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                    QMessageBox msgBox(QMessageBox::Question, "Delete Route",
+                        QString("<div style='font-size:11pt;'><b>Are you sure you want to delete this route?</b><br><br>"
+                                "<b>Destination:</b> %1<br>"
+                                "<b>Netmask:</b> %2<br>"
+                                "<b>Gateway:</b> %3</div>").arg(dest, mask, gw),
+                        QMessageBox::Yes | QMessageBox::Cancel, &dlg);
+                    msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                    msgBox.setDefaultButton(QMessageBox::Cancel);
+                    msgBox.setStyleSheet(
+                        "QLabel { color: #222; font-size: 11pt; } "
+                        "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+                        "QPushButton:hover { background-color: #c0392b; } "
+                        "QPushButton:pressed { background-color: #a93226; } "
+                    );
+                    int ret = msgBox.exec();
                     if (ret != QMessageBox::Yes) return;
                     // Delete route (needs admin)
                     QString psCmd = QString(
@@ -3797,25 +4874,53 @@ void showRouteTableDialog(QWidget *parent) {
                     ).arg(dest, mask, gw);
                     int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
                     if (result == 0) {
-                        QMessageBox::information(&dlg, "Route Deleted", "Route deleted successfully.");
+                        QMessageBox msgBox(QMessageBox::Information, "Route Deleted",
+                            "<b>Route deleted successfully.</b>",
+                            QMessageBox::Ok, &dlg);
+                        msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                        msgBox.exec();
                         fillIPv4Table(table);
                     } else {
-                        QMessageBox::warning(&dlg, "Route Delete", "Failed to delete route (admin rights needed or cancelled).");
+                        QMessageBox msgBox(QMessageBox::Critical, "Delete Route Failed",
+                            "<b>Failed to delete route.</b><br>Administrator rights may be required or the operation was cancelled.",
+                            QMessageBox::Ok, &dlg);
+                        msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                        msgBox.exec();
                         // Do NOT refresh table if failed
                     }
                 });
             }
         }
-        table->resizeColumnsToContents();
+        // Do NOT call resizeColumnsToContents();
     };
 
     std::function<void(QTableWidget*)> fillIPv6Table;
     fillIPv6Table = [&](QTableWidget *table) {
         table->setRowCount(0);
+        table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
         QProcess proc;
         proc.start("route", QStringList() << "print");
         proc.waitForFinished(2000);
         QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+
+        // Set column widths: Metric and If fixed, rest distributed
+        int metricCol = 1, ifCol = 2, destCol = 0, gwCol = 3;
+        int metricWidth = 48; // 4 chars
+        int ifWidth = 32;     // 2 chars
+        int actionCol = 4;
+        int actionWidth = 110;
+        int totalWidth = table->viewport()->width();
+        if (totalWidth < 400) totalWidth = 1200; // fallback for first show
+        int surplus = totalWidth - (metricWidth + ifWidth + actionWidth);
+        int destWidth = surplus * 0.6;
+        int gwWidth = surplus - destWidth;
+        if (destWidth < 150) destWidth = 150;
+        if (gwWidth < 120) gwWidth = 120;
+        table->setColumnWidth(metricCol, metricWidth);
+        table->setColumnWidth(ifCol, ifWidth);
+        table->setColumnWidth(actionCol, actionWidth);
+        table->setColumnWidth(destCol, destWidth);
+        table->setColumnWidth(gwCol, gwWidth);
 
         QStringList lines = output.split('\n', Qt::SkipEmptyParts);
         bool inTable = false;
@@ -3837,35 +4942,83 @@ void showRouteTableDialog(QWidget *parent) {
             if (inTable) {
                 QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
                 if (parts.size() == colCount) {
+                    // Windows prints: If Metric Destination Gateway
+                    // We want: Destination, Metric, If, Gateway
+                    QString dest = parts[2];
+                    QString metric = parts[1];
+                    QString iface = parts[0];
+                    QString gateway = parts[3];
                     int row = table->rowCount();
                     table->insertRow(row);
-                    for (int col = 0; col < colCount; ++col) {
-                        QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
-                        item->setForeground(col == 2 ? blue : (col == 3 ? green : gray));
-                        item->setToolTip(ipv6Tips[col]);
-                        item->setFont(QFont("Segoe UI", 10, QFont::Bold));
-                        table->setItem(row, col, item);
-                    }
-                    // Add Delete button
+                    // Destination
+                    QTableWidgetItem *destItem = new QTableWidgetItem(dest);
+                    destItem->setForeground(blue);
+                    destItem->setToolTip(dest);
+                    destItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    destItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                    table->setItem(row, 0, destItem);
+                    // Metric
+                    QTableWidgetItem *metricItem = new QTableWidgetItem(metric);
+                    metricItem->setForeground(gray);
+                    metricItem->setToolTip(ipv6Tips[1]);
+                    metricItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    metricItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                    table->setItem(row, 1, metricItem);
+                    // If
+                    QTableWidgetItem *ifaceItem = new QTableWidgetItem(iface);
+                    ifaceItem->setForeground(gray);
+                    ifaceItem->setToolTip(ipv6Tips[2]);
+                    ifaceItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    ifaceItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                    table->setItem(row, 2, ifaceItem);
+                    // Gateway
+                    QTableWidgetItem *gwItem = new QTableWidgetItem(gateway);
+                    gwItem->setForeground(green);
+                    gwItem->setToolTip(gateway);
+                    gwItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                    gwItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                    table->setItem(row, 3, gwItem);
+                    // Delete button
                     QPushButton *delBtn = new QPushButton("Delete");
                     delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> -6)");
+                    delBtn->setStyleSheet(
+                        "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 16px; min-width: 80px; min-height: 32px; font-size: 10.5pt; } "
+                        "QPushButton:hover { background-color: #c0392b; } "
+                        "QPushButton:pressed { background-color: #a93226; }"
+                    );
                     table->setCellWidget(row, 4, delBtn);
                     QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
-                        QString dest = parts[2];
-                        int ret = QMessageBox::question(&dlg, "Delete Route",
-                            QString("Are you sure you want to delete this IPv6 route?\n\n"
-                                    "Destination: %1").arg(dest),
-                            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                        QMessageBox msgBox(QMessageBox::Question, "Delete IPv6 Route",
+                            QString("<div style='font-size:11pt;'><b>Are you sure you want to delete this IPv6 route?</b><br><br>"
+                                    "<b>Destination:</b> %1</div>").arg(dest),
+                            QMessageBox::Yes | QMessageBox::Cancel, &dlg);
+                        msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                        msgBox.setDefaultButton(QMessageBox::Cancel);
+                        msgBox.setStyleSheet(
+                            "QLabel { color: #222; font-size: 11pt; } "
+                            "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+                            "QPushButton:hover { background-color: #c0392b; } "
+                            "QPushButton:pressed { background-color: #a93226; } "
+                        );
+                        int ret = msgBox.exec();
                         if (ret != QMessageBox::Yes) return;
                         QString psCmd = QString(
                             "Start-Process route -ArgumentList 'delete %1 -6' -Verb runAs -WindowStyle Hidden"
                         ).arg(dest);
                         int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
                         if (result == 0) {
-                            QMessageBox::information(&dlg, "Route Deleted", "IPv6 route deleted successfully.");
+                            QMessageBox msgBox(QMessageBox::Information, "IPv6 Route Deleted",
+                                "<b>IPv6 route deleted successfully.</b>",
+                                QMessageBox::Ok, &dlg);
+                            msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                            msgBox.exec();
                             fillIPv6Table(table);
                         } else {
-                            QMessageBox::warning(&dlg, "Route Delete", "Failed to delete IPv6 route (admin rights needed or cancelled).");
+                            QMessageBox msgBox(QMessageBox::Critical, "Delete IPv6 Route Failed",
+                                "<b>Failed to delete IPv6 route.</b><br>Administrator rights may be required or the operation was cancelled.",
+                                QMessageBox::Ok, &dlg);
+                            msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                            msgBox.exec();
                             // Do NOT refresh table if failed
                         }
                     });
@@ -3873,26 +5026,52 @@ void showRouteTableDialog(QWidget *parent) {
                     QString nextLine = lines[i + 1].trimmed();
                     QStringList nextParts = nextLine.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
                     if (nextParts.size() == 1) {
+                        // Windows prints: If Metric Destination
+                        // We want: Destination, Metric, If, Gateway
+                        QString dest = parts[2];
+                        QString metric = parts[1];
+                        QString iface = parts[0];
+                        QString gateway = nextParts[0];
                         int row = table->rowCount();
                         table->insertRow(row);
-                        for (int col = 0; col < 3; ++col) {
-                            QTableWidgetItem *item = new QTableWidgetItem(parts[col]);
-                            item->setForeground(col == 2 ? blue : gray);
-                            item->setToolTip(ipv6Tips[col]);
-                            item->setFont(QFont("Segoe UI", 10, QFont::Bold));
-                            table->setItem(row, col, item);
-                        }
-                        QTableWidgetItem *gwItem = new QTableWidgetItem(nextParts[0]);
+                        // Destination
+                        QTableWidgetItem *destItem = new QTableWidgetItem(dest);
+                        destItem->setForeground(blue);
+                        destItem->setToolTip(dest);
+                        destItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        destItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                        table->setItem(row, 0, destItem);
+                        // Metric
+                        QTableWidgetItem *metricItem = new QTableWidgetItem(metric);
+                        metricItem->setForeground(gray);
+                        metricItem->setToolTip(ipv6Tips[1]);
+                        metricItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        metricItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                        table->setItem(row, 1, metricItem);
+                        // If
+                        QTableWidgetItem *ifaceItem = new QTableWidgetItem(iface);
+                        ifaceItem->setForeground(gray);
+                        ifaceItem->setToolTip(ipv6Tips[2]);
+                        ifaceItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        ifaceItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                        table->setItem(row, 2, ifaceItem);
+                        // Gateway
+                        QTableWidgetItem *gwItem = new QTableWidgetItem(gateway);
                         gwItem->setForeground(green);
-                        gwItem->setToolTip(ipv6Tips[3]);
+                        gwItem->setToolTip(gateway);
                         gwItem->setFont(QFont("Segoe UI", 10, QFont::Bold));
+                        gwItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
                         table->setItem(row, 3, gwItem);
-                        // Add Delete button
+                        // Delete button
                         QPushButton *delBtn = new QPushButton("Delete");
                         delBtn->setToolTip("Delete this route.\n(Technical: route delete <destination> -6)");
+                        delBtn->setStyleSheet(
+                            "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 16px; min-width: 80px; min-height: 32px; font-size: 10.5pt; } "
+                            "QPushButton:hover { background-color: #c0392b; } "
+                            "QPushButton:pressed { background-color: #a93226; }"
+                        );
                         table->setCellWidget(row, 4, delBtn);
                         QObject::connect(delBtn, &QPushButton::clicked, [=, &dlg]() {
-                            QString dest = parts[2];
                             int ret = QMessageBox::question(&dlg, "Delete Route",
                                 QString("Are you sure you want to delete this IPv6 route?\n\n"
                                         "Destination: %1").arg(dest),
@@ -3915,7 +5094,7 @@ void showRouteTableDialog(QWidget *parent) {
                 }
             }
         }
-        table->resizeColumnsToContents();
+        // Do NOT call resizeColumnsToContents();
     };
 
     fillIPv4Table(ipv4Table);
@@ -3924,438 +5103,509 @@ void showRouteTableDialog(QWidget *parent) {
     QLabel *ipv4Label = new QLabel("<b>IPv4 Routes</b>");
     ipv4Label->setTextFormat(Qt::RichText);
     layout->addWidget(ipv4Label);
-    layout->addWidget(ipv4Table);
+    layout->addWidget(ipv4Table, 1); // stretch factor 1
 
     QLabel *ipv6Label = new QLabel("<b>IPv6 Routes</b>");
     ipv6Label->setTextFormat(Qt::RichText);
     layout->addWidget(ipv6Label);
-    layout->addWidget(ipv6Table);
+    layout->addWidget(ipv6Table, 1); // stretch factor 1
 
-    // Add route section (IPv4 and IPv6)
-    QGroupBox *addBox = new QGroupBox("Add Route");
-    QFormLayout *form = new QFormLayout(addBox);
-    QComboBox *protoCombo = new QComboBox;
-    protoCombo->addItems({"IPv4", "IPv6"});
-    protoCombo->setToolTip("Select route type.\n(Technical: IPv4 or IPv6 routing table.)");
-    QLineEdit *destEdit = new QLineEdit;
-    destEdit->setPlaceholderText("e.g. 192.168.2.0 or 2001:db8::");
-    destEdit->setToolTip("Destination IP/network.\n(Technical: Network address in CIDR notation.)");
-    QLineEdit *maskEdit = new QLineEdit;
-    maskEdit->setPlaceholderText("e.g. 255.255.255.0 (IPv4 only)");
-    maskEdit->setToolTip("Subnet mask for the destination.\n(Technical: Specifies the network portion of the address.)");
-    QLineEdit *gwEdit = new QLineEdit;
-    gwEdit->setPlaceholderText("e.g. 192.168.1.1 or fe80::1");
-    gwEdit->setToolTip("Gateway IP for forwarding packets.\n(Technical: Next hop for this route.)");
-    QLineEdit *ifaceEdit = new QLineEdit;
-    ifaceEdit->setPlaceholderText("e.g. 192.168.1.100 or interface index");
-    ifaceEdit->setToolTip("Local interface IP address or index.\n(Technical: Adapter used for this route.)");
-    QSpinBox *metricSpin = new QSpinBox;
-    metricSpin->setRange(1, 9999);
-    metricSpin->setValue(10);
-    metricSpin->setToolTip("Route metric (priority).\n(Technical: Lower is preferred.)");
-    QPushButton *addBtn = new QPushButton("Add Route");
-    addBtn->setToolTip("Add this route to the table.\n(Technical: route add <destination> mask <netmask> <gateway> metric <metric> if <interface>.)");
 
-    form->addRow("Type:", protoCombo);
-    form->addRow("Destination:", destEdit);
-    form->addRow("Netmask:", maskEdit);
-    form->addRow("Gateway:", gwEdit);
-    form->addRow("Interface:", ifaceEdit);
-    form->addRow("Metric:", metricSpin);
-    form->addRow(addBtn);
+    // Add Route and Close buttons in a single row: Add Route (left), stretch, Close (right)
+    QHBoxLayout *btnRowLayout = new QHBoxLayout();
+    QPushButton *showAddRouteBtn = new QPushButton("Add Route");
+    showAddRouteBtn->setToolTip("Add a new route to the table.");
+    showAddRouteBtn->setStyleSheet(
+        "QPushButton { background-color: #27ae60; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 32px; min-width: 120px; min-height: 38px; font-size: 12pt; } "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    btnRowLayout->addWidget(showAddRouteBtn);
+    btnRowLayout->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close the dialog");
+    closeBtn->setStyleSheet(
+        "QPushButton { background-color: #34495e; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 32px; min-width: 120px; min-height: 38px; font-size: 12pt; } "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
+    btnRowLayout->addWidget(closeBtn);
+    layout->addLayout(btnRowLayout);
 
-    layout->addWidget(addBox);
-
-    QObject::connect(addBtn, &QPushButton::clicked, [&]() {
-        QString proto = protoCombo->currentText();
-        QString dest = destEdit->text().trimmed();
-        QString mask = maskEdit->text().trimmed();
-        QString gw = gwEdit->text().trimmed();
-        QString iface = ifaceEdit->text().trimmed();
-        int metric = metricSpin->value();
-        if (dest.isEmpty() || gw.isEmpty() || iface.isEmpty() || (proto == "IPv4" && mask.isEmpty())) {
-            QMessageBox::warning(&dlg, "Input Error", "Please fill in all required fields.");
-            return;
-        }
-        int ret = QMessageBox::question(&dlg, "Add Route",
-            QString("Are you sure you want to add this route?\n\n"
-                    "Type: %1\nDestination: %2\nNetmask: %3\nGateway: %4\nInterface: %5\nMetric: %6")
-                .arg(proto, dest, mask, gw, iface).arg(metric),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (ret != QMessageBox::Yes) return;
-        // Add route (needs admin)
-        QString psCmd;
-        if (proto == "IPv4") {
-            psCmd = QString(
-                "Start-Process route -ArgumentList 'add %1 mask %2 %3 metric %4 if %5' -Verb runAs -WindowStyle Hidden"
-            ).arg(dest, mask, gw).arg(metric).arg(iface);
-        } else {
-            psCmd = QString(
-                "Start-Process route -ArgumentList 'add %1 %2 metric %3 if %4 -6' -Verb runAs -WindowStyle Hidden"
-            ).arg(dest, gw).arg(metric).arg(iface);
-        }
-        int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
-        if (result == 0)
-            QMessageBox::information(&dlg, "Route Added", "Route added successfully.");
-        else
-            QMessageBox::warning(&dlg, "Route Add", "Failed to add route (admin rights needed).");
-        fillIPv4Table(ipv4Table);
-        fillIPv6Table(ipv6Table);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(showAddRouteBtn, &QPushButton::clicked, [&dlg, &fillIPv4Table, &fillIPv6Table, ipv4Table, ipv6Table]() {
+        QDialog addDlg(&dlg);
+        addDlg.setWindowTitle("Add Route");
+        addDlg.setModal(true);
+        addDlg.setMinimumWidth(420);
+        addDlg.setMaximumWidth(600);
+        addDlg.setStyleSheet(
+            "QDialog { background-color: #f8f9fa; border: 2px solid #34495e; border-radius: 8px; }"
+        );
+        addCtrlWClose(&addDlg);
+        QVBoxLayout *addLayout = new QVBoxLayout(&addDlg);
+        QLabel *addTitle = new QLabel("<b>Add Route</b><br><span style='color:gray;'>Add a new IPv4 or IPv6 route. All fields required.</span>");
+        addTitle->setTextFormat(Qt::RichText);
+        addLayout->addWidget(addTitle);
+        QFormLayout *form = new QFormLayout();
+        QComboBox *protoCombo = new QComboBox;
+        protoCombo->addItems({"IPv4", "IPv6"});
+        protoCombo->setToolTip("Select route type.\n(Technical: IPv4 or IPv6 routing table.)");
+        QLineEdit *destEdit = new QLineEdit;
+        destEdit->setPlaceholderText("e.g. 192.168.2.0 or 2001:db8::");
+        destEdit->setToolTip("Destination IP/network.\n(Technical: Network address in CIDR notation.)");
+        QLineEdit *maskEdit = new QLineEdit;
+        maskEdit->setPlaceholderText("e.g. 255.255.255.0 (IPv4 only)");
+        maskEdit->setToolTip("Subnet mask for the destination.\n(Technical: Specifies the network portion of the address.)");
+        QLineEdit *gwEdit = new QLineEdit;
+        gwEdit->setPlaceholderText("e.g. 192.168.1.1 or fe80::1");
+        gwEdit->setToolTip("Gateway IP for forwarding packets.\n(Technical: Next hop for this route.)");
+        QLineEdit *ifaceEdit = new QLineEdit;
+        ifaceEdit->setPlaceholderText("e.g. 192.168.1.100 or interface index");
+        ifaceEdit->setToolTip("Local interface IP address or index.\n(Technical: Adapter used for this route.)");
+        QSpinBox *metricSpin = new QSpinBox;
+        metricSpin->setRange(1, 9999);
+        metricSpin->setValue(10);
+        metricSpin->setToolTip("Route metric (priority).\n(Technical: Lower is preferred.)");
+        form->addRow("Type:", protoCombo);
+        form->addRow("Destination:", destEdit);
+        form->addRow("Netmask:", maskEdit);
+        form->addRow("Gateway:", gwEdit);
+        form->addRow("Interface:", ifaceEdit);
+        form->addRow("Metric:", metricSpin);
+        addLayout->addLayout(form);
+        QHBoxLayout *btnRow = new QHBoxLayout();
+        btnRow->addStretch();
+        QPushButton *addBtn = new QPushButton("Add");
+        addBtn->setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 16px; min-width: 90px; min-height: 32px; font-size: 10.5pt; } "
+            "QPushButton:hover { background-color: #2ecc71; } "
+            "QPushButton:pressed { background-color: #229954; }"
+        );
+        QPushButton *cancelBtn = new QPushButton("Cancel");
+        cancelBtn->setStyleSheet(
+            "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 16px; min-width: 90px; min-height: 32px; font-size: 10.5pt; } "
+            "QPushButton:hover { background-color: #c0392b; } "
+            "QPushButton:pressed { background-color: #a93226; }"
+        );
+        btnRow->addWidget(addBtn);
+        btnRow->addSpacing(16);
+        btnRow->addWidget(cancelBtn);
+        btnRow->addStretch();
+        addLayout->addSpacing(8);
+        addLayout->addLayout(btnRow);
+        QObject::connect(cancelBtn, &QPushButton::clicked, &addDlg, &QDialog::reject);
+        QObject::connect(addBtn, &QPushButton::clicked, [&]() {
+            QString proto = protoCombo->currentText();
+            QString dest = destEdit->text().trimmed();
+            QString mask = maskEdit->text().trimmed();
+            QString gw = gwEdit->text().trimmed();
+            QString iface = ifaceEdit->text().trimmed();
+            int metric = metricSpin->value();
+            if (dest.isEmpty() || gw.isEmpty() || iface.isEmpty() || (proto == "IPv4" && mask.isEmpty())) {
+                QMessageBox msgBox(QMessageBox::Warning, "Missing Information",
+                    "<div style='font-size:11pt;'><b>Please fill in all required fields.</b><br>All fields must be completed to add a route.</div>",
+                    QMessageBox::Ok, &addDlg);
+                msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                msgBox.setStyleSheet(
+                    "QLabel { color: #222; font-size: 11pt; } "
+                    "QPushButton { background-color: #e74c3c; color: white; border: none; border-radius: 5px; font-weight: bold; min-width: 90px; min-height: 32px; font-size: 10.5pt; padding: 0 16px; } "
+                    "QPushButton:hover { background-color: #c0392b; } "
+                    "QPushButton:pressed { background-color: #a93226; } "
+                );
+                msgBox.exec();
+                return;
+            }
+            int ret = QMessageBox::question(&addDlg, "Add Route",
+                QString("<b>Are you sure you want to add this route?</b><br><br>"
+                        "<b>Type:</b> %1<br>"
+                        "<b>Destination:</b> %2<br>"
+                        "<b>Netmask:</b> %3<br>"
+                        "<b>Gateway:</b> %4<br>"
+                        "<b>Interface:</b> %5<br>"
+                        "<b>Metric:</b> %6")
+                    .arg(proto, dest, mask, gw, iface).arg(metric),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (ret != QMessageBox::Yes) return;
+            // Add route (needs admin)
+            QString psCmd;
+            if (proto == "IPv4") {
+                psCmd = QString(
+                    "Start-Process route -ArgumentList 'add %1 mask %2 %3 metric %4 if %5' -Verb runAs -WindowStyle Hidden"
+                ).arg(dest, mask, gw).arg(metric).arg(iface);
+            } else {
+                psCmd = QString(
+                    "Start-Process route -ArgumentList 'add %1 %2 metric %3 if %4 -6' -Verb runAs -WindowStyle Hidden"
+                ).arg(dest, gw).arg(metric).arg(iface);
+            }
+            int result = QProcess::execute("powershell", QStringList() << "-WindowStyle" << "Hidden" << "-Command" << psCmd);
+            if (result == 0) {
+                QMessageBox msgBox(QMessageBox::Information, "Route Added",
+                    "<b>Route added successfully.</b>",
+                    QMessageBox::Ok, &addDlg);
+                msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                msgBox.exec();
+            } else {
+                QMessageBox msgBox(QMessageBox::Critical, "Add Route Failed",
+                    "<b>Failed to add route.</b><br>Administrator rights may be required.",
+                    QMessageBox::Ok, &addDlg);
+                msgBox.setWindowIcon(QIcon(":/ip-address.ico"));
+                msgBox.exec();
+            }
+            fillIPv4Table(ipv4Table);
+            fillIPv6Table(ipv6Table);
+            addDlg.accept();
+        });
+        addDlg.exec();
     });
 
-    QPushButton *closeBtn = new QPushButton("Close");
-    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout->addWidget(closeBtn);
 
-    dlg.adjustSize();
+    // Remove adjustSize to prevent dialog from resizing beyond fixed size
     dlg.exec();
 }
 
 void showDnsCacheDialog(QWidget *parent) {
+    // DPI-AWARE DNS CACHE VIEWER - Modern styling like traceroute
     QDialog dlg(parent);
     dlg.setWindowTitle("DNS Cache Viewer");
-    dlg.setMinimumWidth(900);
-    addCtrlWClose(&dlg);
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling
+    int physicalWidth = static_cast<int>(1200 / dpiRatio);
+    int physicalHeight = static_cast<int>(800 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
+    QLabel *prompt = new QLabel("DNS Cache Entries - Shows all cached DNS entries on your system:", &dlg);
+    prompt->setGeometry(10, 10, physicalWidth-20, 25);
+    prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 11pt; }");
 
-    QVBoxLayout *layout = new QVBoxLayout(&dlg);
-
-    QLabel *title = new QLabel(
-        "<b>DNS Cache Viewer</b><br>"
-        "<span style='color:gray;'>Shows all cached DNS entries on your system. - Mouseover any value for technical details.</span>");
-    title->setTextFormat(Qt::RichText);
-    layout->addWidget(title);
-
-    // Table setup
-    QTableWidget *table = new QTableWidget();
+    // Create modern table with DPI-corrected size
+    QTableWidget *table = new QTableWidget(&dlg);
     table->setColumnCount(5);
-    table->setHorizontalHeaderLabels(QStringList()
-        << "Hostname"
-        << "Type"
-        << "IP Address"
-        << "TTL (s)"
-        << "Status");
-    table->verticalHeader()->setVisible(false);
+    QStringList headers = {"Hostname", "Type", "IP Address", "TTL (s)", "Status"};
+    table->setHorizontalHeaderLabels(headers);
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setSelectionMode(QAbstractItemView::ContiguousSelection);
-    table->setSelectionBehavior(QAbstractItemView::SelectItems);
-    table->setFocusPolicy(Qt::StrongFocus);
-    table->setWordWrap(true);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
+    
+    // Enable automatic row height adjustment for multi-line content
+    table->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    
+    // Position table with proper DPI-corrected dimensions
+    int tableWidth = physicalWidth - 20;
+    int tableHeight = physicalHeight - 120;
+    table->setGeometry(10, 45, tableWidth, tableHeight);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    
+    QFont headerFont = table->horizontalHeader()->font();
+    headerFont.setBold(true);
+    table->horizontalHeader()->setFont(headerFont);
 
-    // Tooltips for columns
-    QStringList colTips = {
-        "The domain name or hostname that was resolved.\n(Technical: DNS query name.)",
-        "Record type (A=IPv4, AAAA=IPv6, CNAME, etc).\n(Technical: DNS resource record type.)",
-        "The resolved IP address(es), IPv4 first, then IPv6.\n(Technical: DNS answer data.)",
-        "Time to live (seconds) before this entry expires.\n(Technical: Remaining TTL in cache.)",
-        "Status of this entry (e.g. Success, Negative, etc).\n(Technical: Indicates if the entry is valid or failed.)"
-    };
-    for (int i = 0; i < table->columnCount(); ++i)
-        table->horizontalHeaderItem(i)->setToolTip(colTips[i]);
+    // Set column widths
+    int colWidths[] = {300, 80, 200, 80, tableWidth-660}; // Total: tableWidth
+    for (int i = 0; i < 5; i++) {
+        table->setColumnWidth(i, colWidths[i]);
+    }
 
-    layout->addWidget(table);
+    // Modern buttons positioned at bottom - centered
+    int buttonY = physicalHeight - 45;
+    int buttonWidth = 80;
+    int buttonSpacing = 10;
+    int totalButtonWidth = (buttonWidth * 3) + (buttonSpacing * 2);  // 3 buttons now
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+    
+    QPushButton *refreshBtn = new QPushButton("Refresh", &dlg);
+    refreshBtn->setToolTip("Refresh DNS cache information.");
+    refreshBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    refreshBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
+    QPushButton *copyBtn = new QPushButton("Copy", &dlg);
+    copyBtn->setToolTip("Copy DNS cache information to clipboard.");
+    copyBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    copyBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
+    
+    QPushButton *closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setToolTip("Close the dialog.");
+    closeBtn->setGeometry(startX + (buttonWidth + buttonSpacing) * 2, buttonY, buttonWidth, 35);
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
 
-    // Parse DNS cache
+    // DNS Entry structure
     struct DnsEntry {
         QString hostname, type, data, ttl, status;
     };
-    QList<DnsEntry> entries;
 
-    // Run "ipconfig /displaydns" and parse output
-    QProcess proc;
-    proc.start("ipconfig", QStringList() << "/displaydns");
-    proc.waitForFinished(2000);
-    QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
+    // Function to populate table with DNS cache data
+    auto populateTable = [&]() {
+        table->setRowCount(0);
+        
+        QList<DnsEntry> entries;
 
-    QString hostname, ttl, status;
-    QString currentType;
-    QStringList currentData;
-    auto flushTypeData = [&]() {
-        if (!hostname.isEmpty() && !currentType.isEmpty()) {
-            for (const QString &data : currentData) {
-                entries.append({hostname, currentType, data, ttl, status});
-            }
-        }
-        currentType.clear();
-        currentData.clear();
-    };
+        // Run "ipconfig /displaydns" and parse output
+        QProcess proc;
+        proc.start("ipconfig", QStringList() << "/displaydns");
+        proc.waitForFinished(3000);
+        QString output = QString::fromLocal8Bit(proc.readAllStandardOutput());
 
-    QStringList lines = output.split('\n', Qt::SkipEmptyParts);
-    for (int i = 0; i < lines.size(); ++i) {
-        QString line = lines[i].trimmed();
-        if (line.startsWith("Record Name", Qt::CaseInsensitive)) {
-            flushTypeData();
-            hostname = line.section(':', 1).trimmed();
-            ttl.clear();
-            status = "Success";
-        } else if (line.startsWith("Record Type", Qt::CaseInsensitive)) {
-            flushTypeData();
-            QString t = line.section(':', 1).trimmed();
-            if (t == "1") currentType = "A";
-            else if (t == "28") currentType = "AAAA";
-            else if (t == "5") currentType = "CNAME";
-            else currentType = t;
-        } else if (line.startsWith("Data", Qt::CaseInsensitive)) {
-            QString data = line.section(':', 1).trimmed();
-            currentData.append(data);
-        } else if (line.startsWith("Time To Live", Qt::CaseInsensitive)) {
-            ttl = line.section(':', 1).trimmed();
-        } else if (line.contains("No records", Qt::CaseInsensitive)) {
-            flushTypeData();
-            entries.append({hostname, "-", "-", "-", "Negative"});
-        } else if (line.startsWith("-----")) {
-            flushTypeData();
-            hostname.clear();
-            ttl.clear();
-            status = "Success";
-        }
-    }
-    flushTypeData();
-
-    // Group by hostname for live lookup and merging
-    struct HostResult {
-        QString hostname;
-        QStringList ipv4s;
-        QStringList ipv6s;
-        QString cname;
-        QString ttl;
-        QString status;
-    };
-    QMap<QString, HostResult> hostMap;
-
-    for (const DnsEntry &e : entries) {
-        if (e.status == "Negative") {
-            HostResult &hr = hostMap[e.hostname];
-            hr.hostname = e.hostname;
-            hr.status = "Negative";
-            continue;
-        }
-        HostResult &hr = hostMap[e.hostname];
-        hr.hostname = e.hostname;
-        hr.ttl = e.ttl;
-        hr.status = e.status;
-        if (e.type == "A" && QRegularExpression(R"(^(\d{1,3}\.){3}\d{1,3}$)").match(e.data).hasMatch()) {
-            hr.ipv4s << e.data;
-        } else if (e.type == "AAAA" && e.data.contains(':')) {
-            hr.ipv6s << e.data;
-        } else if (e.type == "CNAME" && e.data.contains('.')) {
-            hr.cname = e.data;
-        }
-    }
-
-    // For any host missing either IPv4 or IPv6, do a live lookup
-    for (auto it = hostMap.begin(); it != hostMap.end(); ++it) {
-        HostResult &hr = it.value();
-        if (hr.status == "Negative") continue;
-        QHostInfo info = QHostInfo::fromName(hr.hostname);
-        for (const QHostAddress &addr : info.addresses()) {
-            if (addr.protocol() == QAbstractSocket::IPv4Protocol) {
-                QString ip = addr.toString();
-                if (!hr.ipv4s.contains(ip))
-                    hr.ipv4s << ip;
-            } else if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
-                QString ip = addr.toString();
-                if (!hr.ipv6s.contains(ip))
-                    hr.ipv6s << ip;
-            }
-        }
-    }
-
-    // Prepare final entries for display
-    QList<DnsEntry> finalEntries;
-    for (const auto &hr : hostMap) {
-        if (hr.status == "Negative") {
-            finalEntries.append({hr.hostname, "-", "-", "-", "Negative"});
-            continue;
-        }
-        QStringList typeLines;
-        typeLines << "A" << "AAAA";
-        if (!hr.cname.isEmpty()) typeLines << "CNAME";
-        QString type = typeLines.join("\n");
-
-        QStringList dataLines;
-        if (!hr.ipv4s.isEmpty())
-            dataLines << hr.ipv4s;
-        else
-            dataLines << "IPv4 not found";
-        if (!hr.ipv6s.isEmpty())
-            dataLines << hr.ipv6s;
-        else
-            dataLines << "IPv6 not found";
-        if (!hr.cname.isEmpty())
-            dataLines << hr.cname;
-        QString data = dataLines.join("\n");
-
-        finalEntries.append({hr.hostname, type, data, hr.ttl, hr.status});
-    }
-
-    // Sorting state
-    int sortColumn = 0;
-    Qt::SortOrder sortOrder = Qt::AscendingOrder;
-
-    auto updateHeaderArrows = [&]() {
-        for (int i = 0; i < table->columnCount(); ++i) {
-            QString label = table->horizontalHeaderItem(i)->text();
-            label = label.split(' ').first();
-            if (i == sortColumn)
-                label += (sortOrder == Qt::AscendingOrder ? " ▲" : " ▼");
-            table->horizontalHeaderItem(i)->setText(label);
-        }
-    };
-
-    auto sortEntries = [&](QList<DnsEntry> list) -> QList<DnsEntry> {
-        std::function<bool(const DnsEntry&, const DnsEntry&)> cmp;
-        switch (sortColumn) {
-            case 0:
-                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
-                    return sortOrder == Qt::AscendingOrder ? a.hostname.toLower() < b.hostname.toLower()
-                                                           : a.hostname.toLower() > b.hostname.toLower();
-                }; break;
-            case 1:
-                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
-                    return sortOrder == Qt::AscendingOrder ? a.type < b.type : a.type > b.type;
-                }; break;
-            case 2:
-                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
-                    return sortOrder == Qt::AscendingOrder ? a.data < b.data : a.data > b.data;
-                }; break;
-            case 3:
-                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
-                    bool okA, okB;
-                    int ttlA = a.ttl.toInt(&okA), ttlB = b.ttl.toInt(&okB);
-                    if (okA && okB)
-                        return sortOrder == Qt::AscendingOrder ? ttlA < ttlB : ttlA > ttlB;
-                    return sortOrder == Qt::AscendingOrder ? a.ttl < b.ttl : a.ttl > b.ttl;
-                }; break;
-            case 4:
-                cmp = [&](const DnsEntry &a, const DnsEntry &b) {
-                    return sortOrder == Qt::AscendingOrder ? a.status < b.status : a.status > b.status;
-                }; break;
-            default: cmp = [](const DnsEntry&, const DnsEntry&) { return false; };
-        }
-        std::sort(list.begin(), list.end(), cmp);
-        return list;
-    };
-
-    auto fillTable = [&]() {
-        QList<DnsEntry> sorted = sortEntries(finalEntries);
-        table->setRowCount(sorted.size());
-        QFont cellFont("Segoe UI", 10, QFont::Bold);
-        QFontMetrics fm(cellFont);
-        int minRowHeight = fm.height() + 6;
-        for (int row = 0; row < sorted.size(); ++row) {
-            const DnsEntry &e = sorted[row];
-            QStringList fields = {e.hostname, e.type, e.data, e.ttl, e.status};
-            for (int col = 0; col < fields.size(); ++col) {
-                if (col == 2) {
-                    QTextEdit *edit = new QTextEdit;
-                    edit->setReadOnly(true);
-                    edit->setFrameStyle(QFrame::NoFrame);
-                    edit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-                    edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-                    edit->setFont(cellFont);
-                    edit->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-                    edit->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-
-                    QStringList lines = fields[col].split('\n');
-                    QString html;
-                    for (const QString &line : lines) {
-                        QString safe = line.toHtmlEscaped();
-                        if (line.trimmed() == "IPv4 not found" || line.trimmed() == "IPv6 not found")
-                            html += "<span style='color:#888;'>" + safe + "</span><br>";
-                        else if (QRegularExpression(R"(^(\d{1,3}\.){3}\d{1,3}$)").match(line).hasMatch())
-                            html += "<span style='color:#7c3cff;'>" + safe + "</span><br>";
-                        else if (line.contains(':'))
-                            html += "<span style='color:#3c1c5c;'>" + safe + "</span><br>";
-                        else
-                            html += safe + "<br>";
-                    }
-                    if (html.endsWith("<br>")) html.chop(4);
-                    edit->setHtml(html);
-                    table->setCellWidget(row, col, edit);
-                } else {
-                    QTableWidgetItem *item = new QTableWidgetItem(fields[col]);
-                    item->setFont(cellFont);
-                    item->setTextAlignment(Qt::AlignLeft | Qt::AlignTop);
-                    if (col == 0) item->setForeground(QBrush(QColor("#1c2684")));
-                    else if (col == 1) item->setForeground(QBrush(QColor("#1a7d2c")));
-                    else if (col == 3) item->setForeground(QBrush(QColor("#888")));
-                    else if (col == 4) {
-                        QBrush statusBrush(QColor("#1a7d2c"));
-                        if (e.status == "Negative")
-                            statusBrush = QBrush(QColor("#c80000"));
-                        item->setForeground(statusBrush);
-                    }
-                    item->setToolTip(colTips[col]);
-                    table->setItem(row, col, item);
+        QString hostname, ttl, status;
+        QString currentType;
+        QStringList currentData;
+        
+        auto flushTypeData = [&]() {
+            if (!hostname.isEmpty() && !currentType.isEmpty()) {
+                for (const QString &data : currentData) {
+                    entries.append({hostname, currentType, data, ttl, status});
                 }
             }
-            int linesType = sorted[row].type.count('\n') + 1;
-            int linesData = sorted[row].data.count('\n') + 1;
-            int lines = qMax(linesType, linesData);
-            table->setRowHeight(row, qMax(minRowHeight, lines * fm.lineSpacing() + 6));
+            currentType.clear();
+            currentData.clear();
+        };
+
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i].trimmed();
+            if (line.startsWith("Record Name", Qt::CaseInsensitive)) {
+                flushTypeData();
+                hostname = line.section(':', 1).trimmed();
+                ttl.clear();
+                status = "Success";
+            } else if (line.startsWith("Record Type", Qt::CaseInsensitive)) {
+                flushTypeData();
+                QString t = line.section(':', 1).trimmed();
+                if (t == "1") currentType = "A";
+                else if (t == "28") currentType = "AAAA";
+                else if (t == "5") currentType = "CNAME";
+                else if (t == "12") currentType = "PTR";
+                else currentType = QString("Type %1").arg(t);
+            } else if (line.startsWith("A Record", Qt::CaseInsensitive) || 
+                       line.startsWith("A (Host) Record", Qt::CaseInsensitive) ||
+                       line.startsWith("AAAA Record", Qt::CaseInsensitive) ||
+                       line.startsWith("CNAME Record", Qt::CaseInsensitive) ||
+                       line.startsWith("PTR Record", Qt::CaseInsensitive)) {
+                QString data = line.section(':', 1).trimmed();
+                if (!data.isEmpty()) {
+                    currentData.append(data);
+                }
+            } else if (line.startsWith("Time To Live", Qt::CaseInsensitive)) {
+                ttl = line.section(':', 1).trimmed();
+            } else if (line.contains("No records", Qt::CaseInsensitive)) {
+                flushTypeData();
+                entries.append({hostname, "-", "-", "-", "Negative"});
+            } else if (line.startsWith("-----")) {
+                flushTypeData();
+                hostname.clear();
+                ttl.clear();
+                status = "Success";
+            }
         }
-        table->resizeColumnsToContents();
-        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-        for (int i = 3; i < table->columnCount(); ++i)
-            table->horizontalHeader()->setSectionResizeMode(i, QHeaderView::Stretch);
-        updateHeaderArrows();
+        flushTypeData();
+
+        // Group by hostname for better display
+        QMap<QString, QList<DnsEntry>> hostMap;
+        for (const DnsEntry &e : entries) {
+            hostMap[e.hostname].append(e);
+        }
+
+        // Populate table
+        int row = 0;
+        for (auto it = hostMap.begin(); it != hostMap.end(); ++it) {
+            const QString &hostname = it.key();
+            const QList<DnsEntry> &hostEntries = it.value();
+            
+            // Group by type for this hostname
+            QMap<QString, QStringList> typeMap;
+            QString hostTtl, hostStatus;
+            
+            for (const DnsEntry &e : hostEntries) {
+                typeMap[e.type].append(e.data);
+                if (hostTtl.isEmpty()) hostTtl = e.ttl;
+                if (hostStatus.isEmpty()) hostStatus = e.status;
+            }
+            
+            // Create one row per hostname with combined data
+            table->insertRow(row);
+            
+            // Hostname
+            QTableWidgetItem *hostnameItem = new QTableWidgetItem(hostname);
+            hostnameItem->setForeground(QBrush(QColor("#1c2684")));
+            hostnameItem->setTextAlignment(Qt::AlignLeft | Qt::AlignTop);
+            table->setItem(row, 0, hostnameItem);
+            
+            // Type
+            QStringList types = typeMap.keys();
+            QString typeText = types.join(", ");
+            QTableWidgetItem *typeItem = new QTableWidgetItem(typeText);
+            typeItem->setForeground(QBrush(QColor("#1a7d2c")));
+            typeItem->setTextAlignment(Qt::AlignLeft | Qt::AlignTop);
+            table->setItem(row, 1, typeItem);
+            
+            // IP Addresses - show all data with line breaks for multiple addresses
+            QStringList allIPs;
+            for (auto typeIt = typeMap.begin(); typeIt != typeMap.end(); ++typeIt) {
+                const QStringList &ips = typeIt.value();
+                for (const QString &ip : ips) {
+                    if (!ip.isEmpty() && ip != "-") {
+                        allIPs.append(ip);
+                    }
+                }
+            }
+            QString ipText = allIPs.isEmpty() ? "-" : allIPs.join("\n");
+            QTableWidgetItem *ipItem = new QTableWidgetItem(ipText);
+            ipItem->setTextAlignment(Qt::AlignLeft | Qt::AlignTop); // Set vertical alignment to top
+            
+            // Color code based on content
+            if (QRegularExpression(R"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").match(ipText).hasMatch()) {
+                ipItem->setForeground(QBrush(QColor("#7c3cff"))); // IPv4 purple
+            } else if (ipText.contains(':') && ipText.length() > 5) {
+                ipItem->setForeground(QBrush(QColor("#3c1c5c"))); // IPv6 dark purple
+            } else if (ipText.contains('.') && ipText != "-") {
+                ipItem->setForeground(QBrush(QColor("#1a7d2c"))); // Domain names green
+            } else {
+                ipItem->setForeground(QBrush(QColor("#888"))); // Gray for not found
+            }
+            table->setItem(row, 2, ipItem);
+            
+            // TTL
+            QTableWidgetItem *ttlItem = new QTableWidgetItem(hostTtl);
+            ttlItem->setForeground(QBrush(QColor("#888")));
+            ttlItem->setTextAlignment(Qt::AlignRight | Qt::AlignTop);
+            table->setItem(row, 3, ttlItem);
+            
+            // Status
+            QTableWidgetItem *statusItem = new QTableWidgetItem(hostStatus);
+            statusItem->setTextAlignment(Qt::AlignCenter | Qt::AlignTop);
+            if (hostStatus == "Negative") {
+                statusItem->setForeground(QBrush(QColor("#c80000")));
+                statusItem->setBackground(QBrush(QColor("#fadbd8")));
+            } else {
+                statusItem->setForeground(QBrush(QColor("#1a7d2c")));
+                statusItem->setBackground(QBrush(QColor("#d5f4e6")));
+            }
+            table->setItem(row, 4, statusItem);
+            
+            row++;
+        }
+        
+        if (table->rowCount() == 0) {
+            table->insertRow(0);
+            table->setItem(0, 0, new QTableWidgetItem("No DNS cache entries found"));
+            QTableWidgetItem *noDataItem = new QTableWidgetItem("Try browsing websites, then refresh");
+            noDataItem->setBackground(QColor("#fadbd8"));
+            noDataItem->setForeground(QColor("#e74c3c"));
+            table->setItem(0, 1, noDataItem);
+            for (int col = 2; col < 5; col++) {
+                table->setItem(0, col, new QTableWidgetItem("-"));
+            }
+        }
     };
 
-    QObject::connect(table->horizontalHeader(), &QHeaderView::sectionClicked, [&](int col) {
-        if (sortColumn == col) {
-            sortOrder = (sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
-        } else {
-            sortColumn = col;
-            sortOrder = (col == 0) ? Qt::AscendingOrder : Qt::DescendingOrder;
+    // Initial population
+    populateTable();
+
+    // Connect buttons
+    QObject::connect(refreshBtn, &QPushButton::clicked, populateTable);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    
+    QObject::connect(copyBtn, &QPushButton::clicked, [&]() {
+        QString csvData = "Hostname,Type,IP Address,TTL,Status\n";
+        for (int row = 0; row < table->rowCount(); ++row) {
+            QStringList rowData;
+            for (int col = 0; col < table->columnCount(); ++col) {
+                QTableWidgetItem *item = table->item(row, col);
+                QString text = item ? item->text().replace(',', ';') : "";
+                rowData.append(text);
+            }
+            csvData += rowData.join(",") + "\n";
         }
-        fillTable();
+        QApplication::clipboard()->setText(csvData);
+        
+        // Show brief confirmation
+        copyBtn->setText("Copied!");
+        QTimer::singleShot(1500, [copyBtn]() {
+            copyBtn->setText("Copy");
+        });
     });
 
-    fillTable();
+    // Ctrl+W shortcut
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
 
-    if (finalEntries.isEmpty()) {
-        QLabel *emptyMsg = new QLabel("<b>No DNS cache entries found.</b><br>Try browsing some websites or running <code>nslookup</code> in a terminal, then refresh.");
-        emptyMsg->setAlignment(Qt::AlignCenter);
-        layout->addWidget(emptyMsg);
-    }
-
-    QGridLayout *legendLayout = new QGridLayout();
-    legendLayout->setColumnStretch(0, 1);
-    legendLayout->setColumnStretch(1, 1);
-    legendLayout->setColumnStretch(2, 1);
-
-    QLabel *greenLbl = new QLabel("<span style='color:#1a7d2c; font-weight:bold;'>Green:</span> Record type, valid status");
-    QLabel *purple4Lbl = new QLabel("<span style='color:#7c3cff; font-weight:bold;'>Purple:</span> IPv4 address");
-    QLabel *blueLbl = new QLabel("<span style='color:#1c2684;'>Blue:</span> Hostname");
-    QLabel *redLbl = new QLabel("<span style='color:#c80000; font-weight:bold;'>Red:</span> Negative/failed entry or unknown type");
-    QLabel *purple6Lbl = new QLabel("<span style='color:#3c1c5c; font-weight:bold;'>Dark purple:</span> IPv6 address");
-    QLabel *grayLbl = new QLabel("<span style='color:#888;'>Gray:</span> Not found markers");
-
-    greenLbl->setTextFormat(Qt::RichText);
-    purple4Lbl->setTextFormat(Qt::RichText);
-    blueLbl->setTextFormat(Qt::RichText);
-    redLbl->setTextFormat(Qt::RichText);
-    purple6Lbl->setTextFormat(Qt::RichText);
-    grayLbl->setTextFormat(Qt::RichText);
-
-    legendLayout->addWidget(greenLbl, 0, 0);
-    legendLayout->addWidget(purple4Lbl, 0, 1);
-    legendLayout->addWidget(blueLbl, 0, 2);
-    legendLayout->addWidget(redLbl, 1, 0);
-    legendLayout->addWidget(purple6Lbl, 1, 1);
-    legendLayout->addWidget(grayLbl, 1, 2);
-
-    QWidget *legendWidget = new QWidget();
-    legendWidget->setLayout(legendLayout);
-    layout->addWidget(legendWidget);
-
-    QPushButton *closeBtn = new QPushButton("Close");
-    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout->addWidget(closeBtn);
-
-    dlg.adjustSize();
     dlg.exec();
 }
 
@@ -4469,11 +5719,26 @@ void showWhoisLookupDialog(QWidget *parent) {
     }
 
     // --- Dialog UI ---
+    // DPI-aware sizing
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen ? screen->devicePixelRatio() : 1.0;
+    int dialogWidth = static_cast<int>(540 / dpiRatio);
+    int dialogHeight = static_cast<int>(420 / dpiRatio);
     QDialog dlg(parent);
     dlg.setWindowTitle("RDAP Domain Lookup");
-    dlg.setMinimumWidth(420);
-    dlg.setMaximumWidth(700);
+    dlg.resize(dialogWidth, dialogHeight);
+    dlg.setMinimumWidth(dialogWidth);
+    dlg.setMaximumWidth(qMax(dialogWidth, 700));
     addCtrlWClose(&dlg);
+
+    // Modern background and black frame
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #222; "
+        "    border-radius: 10px; "
+        "}"
+    );
 
     QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
@@ -4484,28 +5749,69 @@ void showWhoisLookupDialog(QWidget *parent) {
     title->setTextFormat(Qt::RichText);
     layout->addWidget(title);
 
+    // --- Input field, modern style ---
     QLineEdit *domainEdit = new QLineEdit;
     domainEdit->setPlaceholderText("e.g. www.google.com");
     domainEdit->setToolTip("Enter a domain name (any TLD).");
+    domainEdit->setMinimumHeight(36);
+    domainEdit->setStyleSheet(
+        "QLineEdit { border: 2px solid #3498db; border-radius: 5px; padding: 0 12px; font-size: 11pt; } "
+        "QLineEdit:focus { border-color: #2980b9; }"
+    );
     layout->addWidget(domainEdit);
 
+
+    // --- Output window, modern style ---
+    QTextBrowser *output = new QTextBrowser;
+    output->setReadOnly(true);
+    output->setFontFamily("Consolas");
+    int outputMinWidth = 420;
+    int outputMaxWidth = 1100;
+    int outputFixedHeight = 260;
+    output->setMinimumWidth(outputMinWidth);
+    output->setMaximumWidth(outputMaxWidth);
+    output->setMinimumHeight(outputFixedHeight);
+    output->setMaximumHeight(outputFixedHeight);
+    output->setStyleSheet("QTextBrowser { background: #fff; color: #222; border: 2px solid #bbb; border-radius: 5px; font-size: 10.5pt; padding: 8px; }");
+    output->setOpenExternalLinks(true);
+    layout->addWidget(output);
+
+    // Helper to resize dialog width to fit output content (up to max)
+    auto adaptDialogWidth = [&]() {
+        output->document()->adjustSize();
+        int docWidth = int(output->document()->idealWidth()) + 32; // padding for scroll and border
+        int newWidth = qBound(outputMinWidth, docWidth, outputMaxWidth);
+        dlg.resize(newWidth, dlg.height());
+    };
+
+
+    // --- Centered button row below output ---
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
     QPushButton *lookupBtn = new QPushButton("Lookup");
     lookupBtn->setToolTip("Perform RDAP lookup for the entered domain.");
     lookupBtn->setEnabled(false);
-    layout->addWidget(lookupBtn);
-
-    QTextBrowser *output = new QTextBrowser; // <-- Use QTextBrowser!
-    output->setReadOnly(true);
-    output->setFontFamily("Consolas");
-    output->setMinimumHeight(180);
-    output->setMaximumHeight(400);
-    output->setStyleSheet("background:#fff; color:#222; border:1px solid #bbb; border-radius:4px;");
-    output->setOpenExternalLinks(true); // <-- Make links clickable!
-    layout->addWidget(output);
-
+    lookupBtn->setMinimumWidth(110);
+    lookupBtn->setMinimumHeight(36);
+    lookupBtn->setStyleSheet(
+        "QPushButton { background-color: #27ae60; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 24px; font-size: 11pt; } "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    btnLayout->addWidget(lookupBtn);
+    btnLayout->addSpacing(24);
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setMinimumWidth(110);
+    closeBtn->setMinimumHeight(36);
+    closeBtn->setStyleSheet(
+        "QPushButton { background-color: #34495e; color: white; border: none; border-radius: 5px; font-weight: bold; padding: 0 24px; font-size: 11pt; } "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-    layout->addWidget(closeBtn);
+    btnLayout->addWidget(closeBtn);
+    btnLayout->addStretch();
+    layout->addLayout(btnLayout);
 
     QObject::connect(domainEdit, &QLineEdit::textChanged, [=]() {
         lookupBtn->setEnabled(!domainEdit->text().trimmed().isEmpty());
@@ -4525,6 +5831,7 @@ void showWhoisLookupDialog(QWidget *parent) {
         if (rdapServer.isEmpty()) {
             output->setPlainText("No RDAP server found for this TLD.");
             output->setToolTip("No RDAP server found.");
+            adaptDialogWidth();
             return;
         }
         // Compose RDAP URL
@@ -4534,6 +5841,7 @@ void showWhoisLookupDialog(QWidget *parent) {
 
         output->setPlainText(QString("Querying RDAP server:\n%1 ...").arg(rdapUrl));
         output->setToolTip(QString("RDAP server: %1").arg(rdapServer));
+        adaptDialogWidth();
 
         // RDAP query via QNetworkAccessManager
         QNetworkAccessManager mgr;
@@ -4740,18 +6048,42 @@ void showWhoisLookupDialog(QWidget *parent) {
         output->setToolTip(QString("RDAP server: %1").arg(rdapServer));
     });
 
+    // Also adapt on output change (for async/network updates)
+    QObject::connect(output->document(), &QTextDocument::contentsChanged, adaptDialogWidth);
+
     dlg.adjustSize();
     dlg.exec();
 }
 
 
 void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
-    QPointer<QDialog> dlg = new QDialog(parent);
-    dlg->setWindowTitle("LAN Shares Browser");
-    dlg->setMinimumWidth(700);
-    addCtrlWClose(dlg);
 
-    QVBoxLayout *layout = new QVBoxLayout(dlg);
+QDialog dlg(parent);
+dlg.setWindowTitle("LAN Shares Browser");
+dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+// DPI-aware sizing like Trace Route/ARP
+QScreen *screen = QApplication::primaryScreen();
+qreal dpiRatio = screen ? screen->devicePixelRatio() : 1.0;
+int physicalWidth = static_cast<int>(1300 / dpiRatio);
+int physicalHeight = static_cast<int>(900 / dpiRatio);
+dlg.setFixedSize(physicalWidth, physicalHeight);
+dlg.resize(physicalWidth, physicalHeight);
+dlg.setStyleSheet(
+    "QDialog { "
+    "    background-color: #f8f9fa; "
+    "    border: 2px solid #34495e; "
+    "    border-radius: 8px; "
+    "}"
+);
+
+// Add Ctrl+W shortcut for this dialog
+QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+QObject::connect(closeShortcut, &QShortcut::activated, [&dlg]() {
+    dlg.accept();
+});
+
+QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
     QLabel *title = new QLabel(
         "<b>LAN Shares Browser</b><br>"
@@ -4761,20 +6093,107 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
     layout->addWidget(title);
 
     QGroupBox *rangeBox = new QGroupBox("Scan Range / Target");
+    rangeBox->setStyleSheet(
+        "QGroupBox { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 6px; "
+        "    margin-top: 16px; "
+        "    font-weight: bold; "
+        "    padding-top: 18px; " // extra top padding for title
+        "    padding-bottom: 8px; "
+        "    padding-left: 12px; "
+        "    padding-right: 12px; "
+        "} "
+        "QGroupBox::title { "
+        "    subcontrol-origin: margin; "
+        "    left: 18px; "
+        "    top: 2px; "
+        "    padding: 0 8px; "
+        "    color: #34495e; "
+        "    background: #f8f9fa; "
+        "    font-size: 11pt; "
+        "}"
+    );
     QHBoxLayout *rangeLayout = new QHBoxLayout(rangeBox);
-    QLabel *fromLabel = new QLabel("From IP/Name:");
+    rangeLayout->setSpacing(0);
+    rangeLayout->setContentsMargins(0, 0, 0, 0);
+    QLabel *fromLabel = new QLabel("<b>From:</b>");
+    fromLabel->setMinimumWidth(55);
     QLineEdit *fromEdit = new QLineEdit;
-    QLabel *toLabel = new QLabel("To IP:");
+    fromEdit->setMinimumWidth(120);
+    fromEdit->setMaximumWidth(180);
+    fromEdit->setStyleSheet(
+        "QLineEdit { "
+        "    background-color: #fff; "
+        "    border: 1.5px solid #bbb; "
+        "    border-radius: 4px; "
+        "    padding: 4px 8px; "
+        "    font-size: 10.5pt; "
+        "} "
+        "QLineEdit:focus { border: 2px solid #1c2684; }"
+    );
+    QLabel *toLabel = new QLabel("<b>To:</b>");
+    toLabel->setMinimumWidth(32);
     QLineEdit *toEdit = new QLineEdit;
+    toEdit->setMinimumWidth(120);
+    toEdit->setMaximumWidth(180);
+    toEdit->setStyleSheet(
+        "QLineEdit { "
+        "    background-color: #fff; "
+        "    border: 1.5px solid #bbb; "
+        "    border-radius: 4px; "
+        "    padding: 4px 8px; "
+        "    font-size: 10.5pt; "
+        "} "
+        "QLineEdit:focus { border: 2px solid #1c2684; }"
+    );
     QPushButton *scanBtn = new QPushButton("Scan");
+    scanBtn->setToolTip("Start scanning the specified range or target.");
+    scanBtn->setMinimumWidth(80);
+    scanBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #1c2684; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #34495e; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
     QPushButton *stopBtn = new QPushButton("Stop");
+    stopBtn->setToolTip("Stop the current scan.");
+    stopBtn->setMinimumWidth(80);
     stopBtn->setEnabled(false);
+    stopBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; } "
+        "QPushButton:disabled { background-color: #95a5a6; }"
+    );
     rangeLayout->addWidget(fromLabel);
     rangeLayout->addWidget(fromEdit);
+    rangeLayout->addSpacing(8);
     rangeLayout->addWidget(toLabel);
     rangeLayout->addWidget(toEdit);
+    rangeLayout->addSpacing(12);
     rangeLayout->addWidget(scanBtn);
+    rangeLayout->addSpacing(8);
     rangeLayout->addWidget(stopBtn);
+    rangeLayout->addStretch();
     layout->addWidget(rangeBox);
 
     // Autofill with local subnet, default .1 to .254
@@ -4796,15 +6215,15 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
     toEdit->setText(defaultBase + ".254");
 
     // If singleTarget is set, use only that and disable range UI
-    if (!singleTarget.isEmpty()) {
-        fromEdit->setText(singleTarget);
+    if (!singleTarget.isEmpty() && !singleTarget.trimmed().isEmpty()) {
+        fromEdit->setText(singleTarget.trimmed());
         toEdit->setText("");
         fromEdit->setEnabled(false);
         toEdit->setEnabled(false);
         rangeBox->setTitle("Target");
     }
 
-    QPointer<QTreeWidget> tree = new QTreeWidget;
+    QTreeWidget *tree = new QTreeWidget(&dlg);
     tree->setHeaderLabels(QStringList() << "Computer / Share" << "Type" << "Comment");
     tree->setColumnWidth(0, 220);
     tree->setColumnWidth(1, 60);
@@ -4812,11 +6231,41 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
     tree->setSelectionMode(QAbstractItemView::SingleSelection);
     tree->setExpandsOnDoubleClick(true);
     tree->setRootIsDecorated(true);
+    // Modern styling for QTreeWidget
+    tree->setStyleSheet(
+        "QTreeWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "    alternate-background-color: #f8f9fa; "
+        "} "
+        "QTreeWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTreeWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    tree->setAlternatingRowColors(true);
+    // Bold header font
+    QFont headerFont = tree->header()->font();
+    headerFont.setBold(true);
+    tree->header()->setFont(headerFont);
     layout->addWidget(tree, 1);
 
     // Progress bar and time label on same row, time right-aligned
     QHBoxLayout *progressLayout = new QHBoxLayout();
-    QPointer<QProgressBar> progress = new QProgressBar;
+    QProgressBar *progress = new QProgressBar(&dlg);
     progress->setMinimum(0);
     progress->setMaximum(100);
     progress->setValue(0);
@@ -4832,8 +6281,56 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
     QHBoxLayout *expColLayout = new QHBoxLayout();
     expColLayout->addStretch();
     QPushButton *expandAllBtn = new QPushButton("Expand all");
+    expandAllBtn->setToolTip("Expand all computers and shares.");
+    expandAllBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+
     QPushButton *collapseAllBtn = new QPushButton("Collapse all");
+    collapseAllBtn->setToolTip("Collapse all computers and shares.");
+    collapseAllBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
+
     QPushButton *closeBtn = new QPushButton("Close");
+    closeBtn->setToolTip("Close the dialog.");
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
+
     expColLayout->addWidget(expandAllBtn);
     expColLayout->addWidget(collapseAllBtn);
     expColLayout->addWidget(closeBtn);
@@ -4842,33 +6339,35 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
 
     QObject::connect(expandAllBtn, &QPushButton::clicked, tree, &QTreeWidget::expandAll);
     QObject::connect(collapseAllBtn, &QPushButton::clicked, tree, &QTreeWidget::collapseAll);
-    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    QObject::connect(closeBtn, &QPushButton::clicked, [&dlg]() {
+        dlg.close();
+    });
 
-    QObject::connect(tree, &QTreeWidget::itemDoubleClicked, [dlg](QTreeWidgetItem *item, int col) {
+    QObject::connect(tree, &QTreeWidget::itemDoubleClicked, [&dlg](QTreeWidgetItem *item, int col) {
         if (item->parent()) {
             QString unc = QString("\\\\%1\\%2").arg(item->parent()->text(0), item->text(0));
             QApplication::clipboard()->setText(unc);
-            QMessageBox::information(dlg, "UNC Path Copied", QString("Copied to clipboard:\n%1").arg(unc));
+            QMessageBox::information(&dlg, "UNC Path Copied", QString("Copied to clipboard:\n%1").arg(unc));
         }
     });
 
-    QThreadPool *pool = new QThreadPool(dlg);
+    QThreadPool *pool = new QThreadPool(&dlg);
     pool->setMaxThreadCount(16);
 
     auto enableControls = [=]() {
-        bool enabled = singleTarget.isEmpty();
-        fromEdit->setEnabled(enabled);
-        toEdit->setEnabled(enabled);
-        scanBtn->setEnabled(true);
-        stopBtn->setEnabled(false);
+        bool enabled = singleTarget.isEmpty() || singleTarget.trimmed().isEmpty();
+        if (fromEdit) fromEdit->setEnabled(enabled);
+        if (toEdit) toEdit->setEnabled(enabled);
+        if (scanBtn) scanBtn->setEnabled(true);
+        if (stopBtn) stopBtn->setEnabled(false);
     };
 
     auto scanRunning = std::make_shared<bool>(false);
     auto cancelRequested = std::make_shared<bool>(false);
 
     // Scan logic (shared for both normal and single-target mode)
-    auto doScan = [=]() {
-        if (!tree || !progress || !dlg) return;
+    auto doScan = [=, &dlg]() {
+        if (!tree || !progress) return;
         tree->clear();
         progress->setValue(0);
         timeLabel->setText("Time: 00:00 Min.");
@@ -4892,13 +6391,13 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                 for (quint32 ip = fromInt; ip <= toInt; ++ip)
                     targets << QHostAddress(ip).toString();
             } else {
-                QMessageBox::warning(dlg, "Input Error", "Invalid IP address range.");
+                QMessageBox::warning(&dlg, "Input Error", "Invalid IP address range.");
                 return;
             }
         }
 
         if (targets.isEmpty()) {
-            QMessageBox::warning(dlg, "Input Error", "No targets to scan.");
+            QMessageBox::warning(&dlg, "Input Error", "No targets to scan.");
             return;
         }
 
@@ -4914,7 +6413,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
         QElapsedTimer *timer = new QElapsedTimer();
         timer->start();
 
-        QTimer *uiTimer = new QTimer(dlg);
+        QTimer *uiTimer = new QTimer(&dlg);
         uiTimer->setInterval(100);
         auto progressValue = std::make_shared<int>(0);
         timeLabel->setText("Time: 00:00 Min.");
@@ -4932,8 +6431,8 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
         auto pingCompleted = std::make_shared<int>(0);
 
         for (int i = 0; i < targets.size(); ++i) {
-            QFuture<void> unused = QtConcurrent::run(pool, [=]() {
-                if (*cancelRequested || !dlg) return;
+            QFuture<void> unused = QtConcurrent::run(pool, [=, &dlg]() {
+                if (*cancelRequested) return;
                 QString ip = targets[i];
                 QProcess ping;
                 ping.start("ping", QStringList() << "-n" << "1" << "-w" << "200" << ip);
@@ -4945,7 +6444,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                     aliveHosts->append(ip);
                 }
                 QMetaObject::invokeMethod(progress, [=]() {
-                    if (!*scanRunning || !dlg) return;
+                    if (!*scanRunning) return;
                     (*progressValue)++;
                     progress->setValue(*progressValue);
                 }, Qt::QueuedConnection);
@@ -4963,7 +6462,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                         progress->setMaximum(totalSteps + shareSteps);
                     }, Qt::QueuedConnection);
 
-                    if (!*scanRunning || !dlg) return;
+                    if (!*scanRunning) return;
                     auto completed = std::make_shared<int>(0);
                     auto foundHosts = std::make_shared<int>(0);
 
@@ -4971,8 +6470,8 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                     QMutex *resultsMutex = new QMutex;
 
                     for (int j = 0; j < aliveHosts->size(); ++j) {
-                        QFuture<void> unused2 = QtConcurrent::run(pool, [=]() {
-                            if (*cancelRequested || !dlg) return;
+                        QFuture<void> unused2 = QtConcurrent::run(pool, [=, &dlg]() {
+                            if (*cancelRequested) return;
                             QString ip = (*aliveHosts)[j];
                             QList<QList<QString>> shares;
                             try {
@@ -4995,7 +6494,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                                 }
                                 if (!isDuplicate) {
                                     QMetaObject::invokeMethod(tree, [=]() {
-                                        if (!*scanRunning || !dlg) return;
+                                        if (!*scanRunning) return;
                                         QTreeWidgetItem *hostItem = new QTreeWidgetItem(tree, QStringList() << hostLabel);
                                         QFont boldFont = hostItem->font(0);
                                         boldFont.setBold(true);
@@ -5018,7 +6517,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                             }
 
                             QMetaObject::invokeMethod(progress, [=]() {
-                                if (!*scanRunning || !dlg) return;
+                                if (!*scanRunning) return;
                                 (*progressValue)++;
                                 progress->setValue(*progressValue);
                             }, Qt::QueuedConnection);
@@ -5030,8 +6529,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                                 lastShare = (*completed == aliveHosts->size());
                             }
                             if (lastShare) {
-                                QMetaObject::invokeMethod(dlg, [=]() {
-                                    if (!dlg) return;
+                                QMetaObject::invokeMethod(&dlg, [=, &dlg]() {
                                     *scanRunning = false;
                                     scanBtn->setEnabled(true);
                                     stopBtn->setEnabled(false);
@@ -5043,7 +6541,7 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
                                     int sec = int(elapsed % 60);
                                     timeLabel->setText(QString("Time: %1:%2 Min.").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0')));
                                     if (*foundHosts == 0) {
-                                        QMessageBox::information(dlg, "No Shares Found", "No shares found in the specified range.");
+                                        QMessageBox::information(&dlg, "No Shares Found", "No shares found in the specified range.");
                                     }
                                     delete seenHosts;
                                     delete resultsMutex;
@@ -5064,52 +6562,93 @@ void showLanSharesDialog(QWidget *parent, const QString &singleTarget) {
     QObject::connect(stopBtn, &QPushButton::clicked, [=]() {
         *cancelRequested = true;
         *scanRunning = false;
-        scanBtn->setEnabled(true);
-        stopBtn->setEnabled(false);
+        if (pool) {
+            pool->clear();
+            pool->waitForDone();
+        }
         enableControls();
     });
 
-    QObject::connect(dlg, &QDialog::finished, [=]() {
+    QObject::connect(&dlg, &QDialog::finished, [=]() {
+        *cancelRequested = true;
+        *scanRunning = false;
+        if (pool) {
+            pool->clear();
+            pool->waitForDone();
+        }
+        // No deleteLater needed for stack dlg
+    });
+
+    // Also handle reject (X button, Escape key, etc.)
+    QObject::connect(&dlg, &QDialog::rejected, [=, &dlg]() {
+        *cancelRequested = true;
+        *scanRunning = false;
+        if (pool) {
+            pool->clear();
+            pool->waitForDone();
+        }
+        dlg.close();
+    });
+
+    // Always enable controls - let user decide when to scan
+    enableControls();
+
+    // Clean up scan threads when dialog is destroyed
+    QObject::connect(&dlg, &QDialog::destroyed, [=]() {
         *cancelRequested = true;
         *scanRunning = false;
         pool->clear();
         pool->waitForDone();
-        if (dlg) dlg->deleteLater();
+        delete pool;
     });
 
-    // If singleTarget is set, auto-scan on open and disable Scan button
-    if (!singleTarget.isEmpty()) {
-        scanBtn->setEnabled(false);
-        stopBtn->setEnabled(true);
-        QTimer::singleShot(0, doScan);
-    } else {
-        enableControls();
-    }
-
-    dlg->adjustSize();
-    dlg->exec();
-
-    *cancelRequested = true;
-    *scanRunning = false;
-    pool->clear();
-    pool->waitForDone();
-    delete pool;
+    dlg.adjustSize();
+    dlg.exec(); // Use exec() for proper modal behavior and event handling
 }
 
 void showPingDialog(QWidget *parent) {
+
+    // DPI-aware, modern Ping dialog (Resizable, improved layout)
     QDialog dlg(parent);
     dlg.setWindowTitle("Ping Host");
-    dlg.setWindowFlags((dlg.windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::Dialog | Qt::WindowTitleHint);
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    dlg.setMinimumSize(900, 350); // Minimum width 900
+    dlg.setMaximumSize(900, 800); // Maximum width 900, max height 800
+    dlg.resize(900, 420); // Start at 900x420, user can resize up to 900x800
+
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
 
     addCtrlWClose(&dlg);
 
     QVBoxLayout *pingLayout = new QVBoxLayout(&dlg);
+    pingLayout->setContentsMargins(18, 18, 18, 18); // Add margin to dialog sides
+    pingLayout->setSpacing(12);
+    pingLayout->setSizeConstraint(QLayout::SetFixedSize); // Enforce fixed size
 
     QLabel prompt("Enter host or IP to ping:");
     pingLayout->addWidget(&prompt);
 
     QLineEdit input;
     input.setPlaceholderText("e.g. 8.8.8.8 or www.google.com");
+    input.setStyleSheet(
+        "QLineEdit { "
+        "    background-color: #fff; "
+        "    border: 2px solid #3498db; "
+        "    border-radius: 4px; "
+        "    padding: 6px 12px; "
+        "    font-size: 11pt; "
+        "    color: #222; "
+        "} "
+        "QLineEdit:focus { border: 2px solid #1c2684; } "
+        "QLineEdit::placeholder { color: #888; font-style: italic; }"
+    );
     pingLayout->addWidget(&input);
 
     QLabel counterLabel;
@@ -5117,23 +6656,83 @@ void showPingDialog(QWidget *parent) {
     counterLabel.setText("<span style='color:blue;'>Pings: 0</span>");
     pingLayout->addWidget(&counterLabel, 0, Qt::AlignLeft);
 
-    QHBoxLayout btnLayout;
-    QPushButton pingBtn("Start");
-    pingBtn.setToolTip("Start the ping to the specified host.");
-    QPushButton stopCloseBtn("Close");
-    stopCloseBtn.setToolTip("Close the dialog.");
-    QPushButton bottomBtn("Bottom");
-    bottomBtn.setToolTip("Scroll to the bottom of the output.");
-    btnLayout.addWidget(&pingBtn);
-    btnLayout.addWidget(&stopCloseBtn);
-    btnLayout.addWidget(&bottomBtn);
-    pingLayout->addLayout(&btnLayout);
-
     QTextEdit output;
     output.setReadOnly(true);
     output.setLineWrapMode(QTextEdit::NoWrap);
-    output.setMinimumHeight(80);
-    pingLayout->addWidget(&output);
+    output.setMinimumHeight(220); // More space for output
+    output.setSizePolicy(QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding));
+    output.setStyleSheet(
+        "QTextEdit { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    font-family: 'Consolas', 'Courier New', monospace; "
+        "    font-size: 10pt; "
+        "    color: #222; "
+        "    padding: 8px; "
+        "} "
+        "QTextEdit:focus { border: 2px solid #1c2684; } "
+    );
+    pingLayout->addWidget(&output, 1); // Expanding vertically only
+
+    // Button row below output, with spacing
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->setSpacing(18); // Space between buttons
+    btnLayout->addStretch();
+    QPushButton pingBtn("Start");
+    pingBtn.setToolTip("Start the ping to the specified host.");
+    pingBtn.setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    btnLayout->addWidget(&pingBtn);
+    QPushButton bottomBtn("Bottom");
+    bottomBtn.setToolTip("Scroll to the bottom of the output.");
+    bottomBtn.setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    btnLayout->addWidget(&bottomBtn);
+    QPushButton stopCloseBtn("Close");
+    stopCloseBtn.setToolTip("Stop pinging or close the dialog.");
+    stopCloseBtn.setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 0 16px; "
+        "    min-width: 80px; "
+        "    min-height: 32px; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; } "
+        "QPushButton:disabled { background-color: #95a5a6; }"
+    );
+    btnLayout->addWidget(&stopCloseBtn);
+    btnLayout->addStretch();
+    pingLayout->addLayout(btnLayout);
 
     QObject::connect(&bottomBtn, &QPushButton::clicked, [&output]() {
         output.verticalScrollBar()->setValue(output.verticalScrollBar()->maximum());
@@ -5189,7 +6788,29 @@ void showPingDialog(QWidget *parent) {
     QObject::connect(&pingBtn, &QPushButton::clicked, [&]() {
         QString host = input.text().trimmed();
         if (host.isEmpty()) {
-            QMessageBox::warning(&dlg, "Input Error", "Please enter a host or IP address to ping.");
+            QMessageBox msgBox(&dlg);
+            msgBox.setWindowTitle("Input Error");
+            msgBox.setText("Please enter a host or IP address to ping.");
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            msgBox.exec();
             return;
         }
         isPinging = true;
@@ -5232,29 +6853,396 @@ void showPingDialog(QWidget *parent) {
                 for (int i = 1; i < lines.size(); ++i)
                     output.append(lines[i].trimmed());
             }
-            QFontMetrics fm(output.font());
-            int maxLineWidth = 0;
-            for (const QString &line : lines) {
-                int width = fm.horizontalAdvance(line);
-                if (width > maxLineWidth)
-                    maxLineWidth = width;
-            }
-            int margin = 80;
-            int minWidth = 400;
-            int newWidth = qMax(minWidth, maxLineWidth + margin);
-            if (dlg.width() < newWidth)
-                dlg.resize(newWidth, dlg.height());
+    // Removed auto-resize logic to keep dialog width fixed
         });
         pingProc->start("ping", QStringList() << "-n" << "1" << host);
     });
 
-    dlg.adjustSize();
     dlg.exec();
     stopPinging();
 }
 
+void showSslCertificateDialog(QWidget *parent) {
+    // DPI-AWARE SSL CERTIFICATE CHECKER - Modern styling like traceroute and ARP
+    QDialog dlg(parent);
+    dlg.setWindowTitle("SSL Certificate Check");
+    dlg.setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    
+    // GET DPI SCALING FACTOR to calculate correct sizes
+    QScreen *screen = QApplication::primaryScreen();
+    qreal dpiRatio = screen->devicePixelRatio();
+    
+    // Calculate physical sizes accounting for DPI scaling - 1300x900 requested
+    int physicalWidth = static_cast<int>(1300 / dpiRatio);
+    int physicalHeight = static_cast<int>(900 / dpiRatio);
+    
+    // Force size using DPI-corrected values
+    dlg.setFixedSize(physicalWidth, physicalHeight);
+    dlg.resize(physicalWidth, physicalHeight);
+    
+    // Modern dialog styling
+    dlg.setStyleSheet(
+        "QDialog { "
+        "    background-color: #f8f9fa; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 8px; "
+        "}"
+    );
+    
+    // Use absolute positioning for all widgets (DPI-corrected coordinates)
+    
+    QLabel *prompt = new QLabel("SSL Certificate Checker - Enter host and port to check SSL certificates:", &dlg);
+    prompt->setGeometry(10, 10, physicalWidth-20, 25);
+    prompt->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 11pt; }");
+
+    // Input section with host and port
+    QLabel *hostLabel = new QLabel("Host:", &dlg);
+    hostLabel->setGeometry(10, 45, 40, 25);
+    hostLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
+    
+    QLineEdit *hostEdit = new QLineEdit(&dlg);
+    hostEdit->setPlaceholderText("e.g. www.google.com");
+    hostEdit->setGeometry(55, 45, 200, 25);
+    
+    QLabel *portLabel = new QLabel("Port:", &dlg);
+    portLabel->setGeometry(270, 45, 35, 25);
+    portLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; }");
+    
+    QLineEdit *portEdit = new QLineEdit("443", &dlg);
+    portEdit->setValidator(new QIntValidator(1, 65535, portEdit));
+    portEdit->setGeometry(310, 45, 60, 25);
+    
+    QPushButton *checkBtn = new QPushButton("Check Certificate", &dlg);
+    checkBtn->setGeometry(385, 45, 120, 25);
+    checkBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+
+    // Create modern table for certificate list
+    QTableWidget *table = new QTableWidget(&dlg);
+    table->setColumnCount(5);
+    QStringList headers = {"Certificate", "Subject", "Issuer", "Expires", "In Store"};
+    table->setHorizontalHeaderLabels(headers);
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
+    
+    // Position table in top section - give it more room
+    int tableWidth = physicalWidth - 20;
+    int tableHeight = (physicalHeight - 120) * 0.4; // 40% of available space
+    table->setGeometry(10, 85, tableWidth, tableHeight);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    
+    // Modern table styling
+    table->setStyleSheet(
+        "QTableWidget { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    gridline-color: #bdc3c7; "
+        "} "
+        "QTableWidget::item { "
+        "    padding: 6px; "
+        "    border-bottom: 1px solid #d5dbdb; "
+        "} "
+        "QTableWidget::item:selected { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "} "
+        "QHeaderView::section { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    padding: 8px; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "}"
+    );
+    
+    QFont headerFont = table->horizontalHeader()->font();
+    headerFont.setBold(true);
+    table->horizontalHeader()->setFont(headerFont);
+
+    // Set column widths for certificate table - adjusted for wider window and more detailed store info
+    int colWidths[] = {80, 280, 280, 100, tableWidth-740}; // Total: tableWidth, more space for store column
+    for (int i = 0; i < 5; i++) {
+        table->setColumnWidth(i, colWidths[i]);
+    }
+
+    // Certificate details section (bottom section - much larger)
+    QLabel *detailsLabel = new QLabel("Certificate Details:", &dlg);
+    int detailsY = 85 + tableHeight + 10;
+    detailsLabel->setGeometry(10, detailsY, 200, 25);
+    detailsLabel->setStyleSheet("QLabel { color: #2c3e50; font-weight: bold; font-size: 11pt; }");
+    
+    QTextEdit *detailsText = new QTextEdit(&dlg);
+    detailsText->setReadOnly(true);
+    detailsText->setGeometry(10, detailsY + 30, tableWidth, physicalHeight - detailsY - 85); // Use remaining space minus button area
+    detailsText->setStyleSheet(
+        "QTextEdit { "
+        "    background-color: #ecf0f1; "
+        "    border: 2px solid #34495e; "
+        "    border-radius: 5px; "
+        "    font-family: 'Consolas', 'Courier New', monospace; "
+        "    font-size: 9pt; "
+        "    color: #2c3e50; "
+        "}"
+    );
+
+    // Modern buttons positioned at bottom - centered
+    int buttonY = physicalHeight - 45;
+    int buttonWidth = 80;
+    int buttonSpacing = 10;
+    int totalButtonWidth = (buttonWidth * 2) + buttonSpacing;
+    int startX = (physicalWidth - totalButtonWidth) / 2;
+    
+    QPushButton *removeBtn = new QPushButton("Remove", &dlg);
+    removeBtn->setToolTip("Remove selected certificate from Windows store.");
+    removeBtn->setGeometry(startX, buttonY, buttonWidth, 35);
+    removeBtn->setEnabled(false);
+    removeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; } "
+        "QPushButton:disabled { background-color: #95a5a6; }"
+    );
+    
+    QPushButton *closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setToolTip("Close the dialog.");
+    closeBtn->setGeometry(startX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 35);
+    closeBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "} "
+        "QPushButton:hover { background-color: #2c3e50; } "
+        "QPushButton:pressed { background-color: #1a252f; }"
+    );
+
+    // Store certificate data
+    struct CertInfo {
+        QSslCertificate cert;
+        QByteArray sha1;
+        QString store;
+        bool inStore;
+    };
+    QList<CertInfo> certList;
+
+    // Working certificate detection function (DO NOT MODIFY!)
+    auto certInStore = [](const QByteArray &sha1, QString &storeOut) -> bool {
+        // Use Windows Certificate Store API directly - much more reliable than PowerShell
+        const char* storeNames[] = {"ROOT", "CA", "MY", "TrustedPeople"};
+        const DWORD storeLocations[] = {CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE};
+        const char* locationNames[] = {"CurrentUser", "LocalMachine"};
+        
+        for (int loc = 0; loc < 2; loc++) {
+            for (int store = 0; store < 4; store++) {
+                // Open the certificate store with proper location flags
+                HCERTSTORE hStore = CertOpenStore(
+                    CERT_STORE_PROV_SYSTEM_A,
+                    0,
+                    NULL,
+                    storeLocations[loc] | CERT_STORE_READONLY_FLAG,
+                    storeNames[store]
+                );
+                
+                if (!hStore) {
+                    continue;
+                }
+                
+                PCCERT_CONTEXT pCertContext = NULL;
+                bool found = false;
+                
+                while ((pCertContext = CertEnumCertificatesInStore(hStore, pCertContext)) != NULL) {
+                    // Get SHA1 hash of the certificate
+                    BYTE certHash[20];
+                    DWORD hashSize = 20;
+                    
+                    if (CertGetCertificateContextProperty(pCertContext, CERT_SHA1_HASH_PROP_ID, certHash, &hashSize)) {
+                        QByteArray certSha1((const char*)certHash, hashSize);
+                        
+                        if (certSha1 == sha1) {
+                            found = true;
+                            storeOut = QString("%1\\%2").arg(locationNames[loc], storeNames[store]);
+                            break;
+                        }
+                    }
+                }
+                
+                CertCloseStore(hStore, 0);
+                
+                if (found) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    };
+
+    // Certificate check function
+    auto doCheck = [&]() {
+        QString host = hostEdit->text().trimmed();
+        int port = portEdit->text().toInt();
+        if (host.isEmpty() || port < 1 || port > 65535) {
+            detailsText->setPlainText("Please enter a valid host and port.");
+            return;
+        }
+        
+        table->setRowCount(0);
+        certList.clear();
+        detailsText->clear();
+        removeBtn->setEnabled(false);
+
+        // Network operation (fast, no spinner needed)
+        QSslSocket socket;
+        socket.connectToHostEncrypted(host, port);
+        bool ok = socket.waitForEncrypted(5000);
+
+        if (!ok) {
+            detailsText->setPlainText("Could not connect or handshake failed:\n" + socket.errorString());
+            return;
+        }
+        
+        QList<QSslCertificate> certs = socket.peerCertificateChain();
+        if (certs.isEmpty()) {
+            detailsText->setPlainText("No certificate received.");
+            return;
+        }
+
+        // Process certificates with working detection logic
+        for (const QSslCertificate &cert : certs) {
+            QByteArray sha1 = cert.digest(QCryptographicHash::Sha1);
+            QString store;
+            bool inStore = certInStore(sha1, store);
+            certList.append(CertInfo{cert, sha1, store, inStore});
+        }
+        
+        // Sort certificates: in-store first
+        std::sort(certList.begin(), certList.end(), [](const CertInfo &a, const CertInfo &b) {
+            return a.inStore > b.inStore;
+        });
+
+        // Populate table
+        table->setRowCount(certList.size());
+        for (int i = 0; i < certList.size(); ++i) {
+            const CertInfo &ci = certList[i];
+            table->setItem(i, 0, new QTableWidgetItem(QString("Cert #%1").arg(i + 1)));
+            table->setItem(i, 1, new QTableWidgetItem(ci.cert.subjectInfo(QSslCertificate::CommonName).join(", ")));
+            table->setItem(i, 2, new QTableWidgetItem(ci.cert.issuerInfo(QSslCertificate::CommonName).join(", ")));
+            table->setItem(i, 3, new QTableWidgetItem(ci.cert.expiryDate().toString("yyyy-MM-dd")));
+            
+            // Show detailed store information in the "In Store" column
+            QString storeText = ci.inStore ? "Yes" : "No";
+            table->setItem(i, 4, new QTableWidgetItem(storeText));
+            
+            // Color code the in-store column for better visibility
+            if (ci.inStore) {
+                table->item(i, 4)->setBackground(QColor("#2ecc71"));
+                table->item(i, 4)->setForeground(QColor("#2c3e50"));
+                table->item(i, 4)->setFont(QFont("", -1, QFont::Bold));
+            } else {
+                table->item(i, 4)->setBackground(QColor("#3498db"));
+                table->item(i, 4)->setForeground(QColor("#2c3e50"));
+                table->item(i, 4)->setFont(QFont("", -1, QFont::Bold));
+            }
+        }
+        
+        if (!certList.isEmpty()) {
+            table->selectRow(0);
+        }
+    };
+
+    // Table selection handler
+    QObject::connect(table, &QTableWidget::itemSelectionChanged, [&]() {
+        int row = table->currentRow();
+        if (row >= 0 && row < certList.size()) {
+            const CertInfo &ci = certList[row];
+            
+            QString details;
+            details += QString("Certificate #%1\n").arg(row + 1);
+            details += QString("Subject:     %1\n").arg(ci.cert.subjectInfo(QSslCertificate::CommonName).join(", "));
+            details += QString("Issuer:      %1\n").arg(ci.cert.issuerInfo(QSslCertificate::CommonName).join(", "));
+            details += QString("Valid from:  %1\n").arg(ci.cert.effectiveDate().toString());
+            details += QString("Valid to:    %1\n").arg(ci.cert.expiryDate().toString());
+            details += QString("Serial:      %1\n").arg(ci.cert.serialNumber());
+            details += QString("SHA1:        %1\n").arg(QString::fromLatin1(ci.sha1.toHex()));
+            details += QString("In Store:    %1\n").arg(ci.inStore ? QString("Yes (%1)").arg(ci.store) : "No");
+            
+            detailsText->setPlainText(details);
+            removeBtn->setEnabled(ci.inStore);
+        } else {
+            detailsText->clear();
+            removeBtn->setEnabled(false);
+        }
+    });
+
+    // Remove certificate function
+    QObject::connect(removeBtn, &QPushButton::clicked, [&]() {
+        int row = table->currentRow();
+        if (row >= 0 && row < certList.size()) {
+            const CertInfo &ci = certList[row];
+            if (!ci.inStore) return;
+            
+            QMessageBox msgBox(&dlg);
+            msgBox.setWindowTitle("Remove Certificate");
+            msgBox.setText(QString("Are you sure you want to remove the certificate for [%1]?").arg(hostEdit->text()));
+            msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+            msgBox.setDefaultButton(QMessageBox::Cancel);
+            int ret = msgBox.exec();
+            
+            if (ret == QMessageBox::Yes) {
+                QString psCmd = QString("Remove-Item -Path Cert:\\LocalMachine\\%1\\%2 -Force").arg(ci.store, QString::fromLatin1(ci.sha1.toHex().toUpper()));
+                int result = QProcess::execute("powershell", QStringList() << "-Command" << psCmd);
+                if (result == 0) {
+                    QMessageBox::information(&dlg, "Certificate Removed", "Certificate removed from store.");
+                    doCheck(); // Refresh
+                } else {
+                    QMessageBox::warning(&dlg, "Failed", "Failed to remove certificate.");
+                }
+            }
+        }
+    });
+
+    // Connect buttons and inputs
+    QObject::connect(checkBtn, &QPushButton::clicked, doCheck);
+    QObject::connect(hostEdit, &QLineEdit::returnPressed, doCheck);
+    QObject::connect(portEdit, &QLineEdit::returnPressed, doCheck);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    // Ctrl+W shortcut
+    QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &dlg);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    QObject::connect(closeShortcut, &QShortcut::activated, &dlg, &QDialog::accept);
+
+    dlg.exec();
+}
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+
+
+    // ...reverted: using standard QMainWindow...
+
 
     // --- Network info setup ---
     QString ipAddress, subnetMask, adapterName, defaultGateway = "Unavailable", externalIp = "Checking...";
@@ -5300,28 +7288,162 @@ int main(int argc, char *argv[]) {
 
     QMainWindow window;
     window.setWindowTitle("IPGui V. " + VersionNumber);
+    
+    // Apply modern styling to main window (no visible frame)
+    window.setStyleSheet(
+        "QMainWindow { "
+        "    background-color: #f8f9fa; "
+        "    border: none; "
+        "} "
+        "QMenuBar { "
+        "    background-color: #34495e; "
+        "    color: white; "
+        "    border: none; "
+        "    font-weight: bold; "
+        "    font-size: 10pt; "
+        "    margin-left: 2px; "
+        "    margin-right: 2px; "
+        "    padding: 1px; "
+        "} "
+        "QMenuBar::item { "
+        "    background-color: transparent; "
+        "    padding: 4px 16px; "
+        "    margin: 2px; "
+        "    border-radius: 4px; "
+        "} "
+        "QMenuBar::item:selected { "
+        "    background-color: #2c3e50; "
+        "    color: white; "
+        "} "
+        "QMenuBar::item:hover { "
+        "    background-color: #2c3e50; "
+        "    color: white; "
+        "} "
+        "QMenu { "
+        "    background-color: #34495e; "
+        "    border: 2px solid #2c3e50; "
+        "    border-radius: 8px; "
+        "    font-size: 10pt; "
+        "    padding: 4px; "
+        "} "
+        "QMenu::item { "
+        "    padding: 8px 16px; "
+        "    color: white; "
+        "    border-radius: 4px; "
+        "    margin: 1px; "
+        "} "
+        "QMenu::item:selected { "
+        "    background-color: #2c3e50; "
+        "    color: white; "
+        "    border: none; "
+        "} "
+        "QMenu::item:hover { "
+        "    background-color: #2c3e50; "
+        "    color: white; "
+        "} "
+        "QMenu::separator { "
+        "    height: 2px; "
+        "    background-color: #bdc3c7; "
+        "    margin: 4px 8px; "
+        "} "
+        "QMenu::icon { "
+        "    margin: 2px; "
+        "}"
+    );
 
     QWidget *centralWidget = new QWidget();
+    centralWidget->setStyleSheet(
+        "QWidget { "
+        "    background-color: #f8f9fa; "
+        "    border-radius: 8px; "
+        "}"
+    );
     QVBoxLayout *layout = new QVBoxLayout(centralWidget);
 
-    // Info box
+    // Info box with modern styling
     QTextEdit *infoBox = new QTextEdit();
     infoBox->setReadOnly(true);
     infoBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    infoBox->setStyleSheet(
+        "QTextEdit { "
+        "    background-color: #ecf0f1; "
+        "    border: none; "
+        "    font-family: 'Consolas', 'Courier New', monospace; "
+        "    font-size: 10pt; "
+        "    padding: 6px; "
+        "    color: #2c3e50; "
+        "}"
+    );
     layout->addWidget(infoBox);
     updateIpDisplay(infoBox);
 
-    // Buttons
+    // Buttons with modern styling
     QVBoxLayout *buttonRows = new QVBoxLayout();
     QHBoxLayout *row1 = new QHBoxLayout();
     QPushButton *expandBtn = new QPushButton("Advanced");
+    expandBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #9b59b6; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #8e44ad; } "
+        "QPushButton:pressed { background-color: #7d3c98; }"
+    );
+    
     QPushButton *flushBtn = new QPushButton("Flush DNS");
+    flushBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #3498db; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #1f618d; }"
+    );
+    
     row1->addWidget(expandBtn);
     row1->addWidget(flushBtn);
 
     QHBoxLayout *row2 = new QHBoxLayout();
     QPushButton *releaseBtn = new QPushButton("Release IP");
+    releaseBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #e74c3c; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #c0392b; } "
+        "QPushButton:pressed { background-color: #a93226; }"
+    );
+    
     QPushButton *renewBtn = new QPushButton("Renew IP");
+    renewBtn->setStyleSheet(
+        "QPushButton { "
+        "    background-color: #27ae60; "
+        "    color: white; "
+        "    border: none; "
+        "    border-radius: 5px; "
+        "    font-weight: bold; "
+        "    padding: 8px 16px; "
+        "    font-size: 10pt; "
+        "} "
+        "QPushButton:hover { background-color: #2ecc71; } "
+        "QPushButton:pressed { background-color: #229954; }"
+    );
+    
     row2->addWidget(releaseBtn);
     row2->addWidget(renewBtn);
 
@@ -5331,10 +7453,163 @@ int main(int argc, char *argv[]) {
 
     QObject::connect(flushBtn, &QPushButton::clicked, [&]() {
         int result = QProcess::execute("ipconfig", QStringList() << "/flushdns");
-        if (result == 0)
-            QMessageBox::information(nullptr, "Flush DNS", "DNS cache flushed.");
-        else
-            QMessageBox::warning(nullptr, "Flush DNS", "Failed to flush DNS cache.");
+        if (result == 0) {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Flush DNS");
+            msgBox.setText("DNS cache flushed successfully!");
+            msgBox.setIcon(QMessageBox::Information);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #3498db; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #2980b9; } "
+                "QPushButton:pressed { background-color: #1f618d; }"
+            );
+            msgBox.exec();
+        } else {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Flush DNS");
+            msgBox.setText("Failed to flush DNS cache.");
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            msgBox.exec();
+        }
+    });
+
+    QObject::connect(releaseBtn, &QPushButton::clicked, [&]() {
+        int result = QProcess::execute("ipconfig", QStringList() << "/release");
+        if (result == 0) {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Release IP");
+            msgBox.setText("IP address released successfully!");
+            msgBox.setIcon(QMessageBox::Information);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #27ae60; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #2ecc71; } "
+                "QPushButton:pressed { background-color: #229954; }"
+            );
+            msgBox.exec();
+            updateIpDisplay(infoBox); // Refresh the display
+        } else {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Release IP");
+            msgBox.setText("Failed to release IP address.");
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            msgBox.exec();
+        }
+    });
+
+    QObject::connect(renewBtn, &QPushButton::clicked, [&]() {
+        int result = QProcess::execute("ipconfig", QStringList() << "/renew");
+        if (result == 0) {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Renew IP");
+            msgBox.setText("IP address renewed successfully!");
+            msgBox.setIcon(QMessageBox::Information);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #27ae60; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #2ecc71; } "
+                "QPushButton:pressed { background-color: #229954; }"
+            );
+            msgBox.exec();
+            updateIpDisplay(infoBox); // Refresh the display
+        } else {
+            QMessageBox msgBox;
+            msgBox.setWindowTitle("Renew IP");
+            msgBox.setText("Failed to renew IP address.");
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setStyleSheet(
+                "QMessageBox { "
+                "    background-color: #f8f9fa; "
+                "    border: 2px solid #34495e; "
+                "    border-radius: 8px; "
+                "} "
+                "QPushButton { "
+                "    background-color: #e74c3c; "
+                "    color: white; "
+                "    border: none; "
+                "    border-radius: 5px; "
+                "    font-weight: bold; "
+                "    padding: 8px 16px; "
+                "    font-size: 10pt; "
+                "} "
+                "QPushButton:hover { background-color: #c0392b; } "
+                "QPushButton:pressed { background-color: #a93226; }"
+            );
+            msgBox.exec();
+        }
     });
 
     window.setCentralWidget(centralWidget);
@@ -5365,7 +7640,7 @@ int main(int argc, char *argv[]) {
             updateIpDisplay(infoBox);
             expandBtn->setText("Advanced");
             expanded = false;
-            window.resize(255, 330);
+            window.resize(300, 380);  // Compact size while showing all content
             QScreen *screen = QGuiApplication::primaryScreen();
             QRect screenGeometry = screen->availableGeometry();
             QRect windowGeometry = window.frameGeometry();
@@ -5380,27 +7655,43 @@ int main(int argc, char *argv[]) {
     QMenu *fileMenu = menuBar->addMenu("&Actions");
     QMenu *netToolsMenu = fileMenu->addMenu("NetTools");
 
-    QAction *arpAction           = netToolsMenu->addAction("Arp");
-    QAction *dhcpStatusAction    = netToolsMenu->addAction("DHCP Status");
-    QAction *dnsCacheAction      = netToolsMenu->addAction("DNS Cache Viewer");
-    QAction *hostsFileAction     = netToolsMenu->addAction("Hosts File Editor");
-    QAction *sslCertAction       = netToolsMenu->addAction("HTTPS Certificate Check");
-    QAction *netscanAction       = netToolsMenu->addAction("IP Scanner");
-    QAction *lanSharesAction     = netToolsMenu->addAction("LAN Shares");
-    QAction *mtuDiscoveryAction  = netToolsMenu->addAction("MTU Discovery");
-    QAction *netstatStatsAction  = netToolsMenu->addAction("Netstat Statistics");
-    QAction *adaptersAction      = netToolsMenu->addAction("Network Adapters");
-    QAction *netUsageAction      = netToolsMenu->addAction("Network Usage");
-    QAction *nslookupAction      = netToolsMenu->addAction("NS Lookup");
-    QAction *pingAction          = netToolsMenu->addAction("Ping");
-    QAction *portscanAction      = netToolsMenu->addAction("Port Scan");
-    QAction *routeTableAction    = netToolsMenu->addAction("Route Table Viewer/Editor");
-    QAction *tracertAction       = netToolsMenu->addAction("Traceroute");
-    QAction *whoisLookupAction   = netToolsMenu->addAction("Whois (RDAP) Lookup");
-    QAction *wifiScanAction      = netToolsMenu->addAction("WiFi Scan");
+    QAction *arpAction           = netToolsMenu->addAction("🔗 Arp");
+    QAction *dhcpStatusAction    = netToolsMenu->addAction("📋 DHCP Status");
+    QAction *dnsCacheAction      = netToolsMenu->addAction("🗂️ DNS Cache Viewer");
+    QAction *hostsFileAction     = netToolsMenu->addAction("📝 Hosts File Editor");
+    QAction *sslCertAction       = netToolsMenu->addAction("🔒 HTTPS Certificate Check");
+    QAction *netscanAction       = netToolsMenu->addAction("🔍 IP Scanner");
+    QAction *lanSharesAction     = netToolsMenu->addAction("📁 LAN Shares");
+    QAction *mtuDiscoveryAction  = netToolsMenu->addAction("📏 MTU Discovery");
+    QAction *netstatStatsAction  = netToolsMenu->addAction("📊 Netstat Statistics");
+    QAction *adaptersAction      = netToolsMenu->addAction("🔌 Network Adapters");
+    QAction *netUsageAction      = netToolsMenu->addAction("📈 Network Usage");
+    QAction *nslookupAction      = netToolsMenu->addAction("🔎 NS Lookup");
+    QAction *pingAction          = netToolsMenu->addAction("📡 Ping");
+    QAction *portscanAction      = netToolsMenu->addAction("🚪 Port Scan");
+    QAction *routeTableAction    = netToolsMenu->addAction("🗺️ Route Table Viewer/Editor");
+    QAction *tracertAction       = netToolsMenu->addAction("🛤️ Traceroute");
+    QAction *whoisLookupAction   = netToolsMenu->addAction("📇 Whois (RDAP) Lookup");
+    QAction *wifiScanAction      = netToolsMenu->addAction("📶 WiFi Scan");
 
-    QAction *alwaysOnTopAction = fileMenu->addAction("🔵 Always on top");
-    QAction *deleteTempAction = fileMenu->addAction("Delete Temporary Files");
+    QAction *alwaysOnTopAction = fileMenu->addAction("📌 Always on top");
+    QAction *deleteTempAction = fileMenu->addAction("🗑️ Delete Temporary Files");
+    fileMenu->addSeparator();
+    QAction *exitAction = fileMenu->addAction("🚪 E&xit");
+    exitAction->setShortcut(QKeySequence::Quit);
+
+    // Function to update always on top action appearance
+    auto updateAlwaysOnTopState = [&alwaysOnTopAction, &window]() {
+        bool isOnTop = window.windowFlags() & Qt::WindowStaysOnTopHint;
+        if (isOnTop) {
+            alwaysOnTopAction->setText("🔴 Always on top");
+        } else {
+            alwaysOnTopAction->setText("◯ Always on top");
+        }
+    };
+
+    // Initialize the state
+    updateAlwaysOnTopState();
 
     // --- Connectors for dialogs ---
     QObject::connect(lanSharesAction, &QAction::triggered, [&window]() { showLanSharesDialog(&window); });
@@ -5412,10 +7703,48 @@ int main(int argc, char *argv[]) {
     QObject::connect(mtuDiscoveryAction, &QAction::triggered, [&window]() { showMtuDiscoveryDialog(&window); });
     QObject::connect(sslCertAction, &QAction::triggered, [&window]() { showSslCertificateDialog(&window); });
     QObject::connect(adaptersAction, &QAction::triggered, [&window]() { showNetworkAdaptersDialog(&window); });
-    QObject::connect(alwaysOnTopAction, &QAction::triggered, [&]() {
+    QObject::connect(alwaysOnTopAction, &QAction::triggered, [&, updateAlwaysOnTopState]() {
         bool onTop = !(window.windowFlags() & Qt::WindowStaysOnTopHint);
         window.setWindowFlag(Qt::WindowStaysOnTopHint, onTop);
         window.show();
+        updateAlwaysOnTopState();
+    });
+    QObject::connect(deleteTempAction, &QAction::triggered, [&window]() {
+        // Delete IPGui temporary files directory
+        QString ipguiTempDir = "C:/Users/Public/AppData/Local/IPGui";
+        QDir dir(ipguiTempDir);
+        
+        if (!dir.exists()) {
+            QMessageBox::information(&window, "Delete Temporary Files", 
+                QString("No temporary files found.\n\nDirectory: %1").arg(ipguiTempDir));
+            return;
+        }
+        
+        // Confirm deletion
+        int ret = QMessageBox::question(&window, "Delete Temporary Files", 
+            QString("Are you sure you want to delete all IPGui temporary files?\n\n"
+                    "Directory: %1\n\n"
+                    "This will delete all cached files, backups, and temporary data.")
+                .arg(ipguiTempDir),
+            QMessageBox::Yes | QMessageBox::Cancel, 
+            QMessageBox::Cancel);
+            
+        if (ret == QMessageBox::Yes) {
+            // Remove the entire IPGui directory
+            bool success = dir.removeRecursively();
+            
+            if (success) {
+                QMessageBox::information(&window, "Delete Temporary Files", 
+                    "Temporary files deleted successfully!");
+            } else {
+                QMessageBox::warning(&window, "Delete Temporary Files", 
+                    "Failed to delete some temporary files.\n\n"
+                    "Some files may be in use or require administrator privileges.");
+            }
+        }
+    });
+    QObject::connect(exitAction, &QAction::triggered, [&window]() {
+        window.close();
     });
     QObject::connect(wifiScanAction, &QAction::triggered, [&window]() { showWifiScanDialog(&window); });
     QObject::connect(arpAction, &QAction::triggered, [&window]() { showArpDialog(&window); });
@@ -5429,8 +7758,10 @@ int main(int argc, char *argv[]) {
 
     // Restore Help menu
 QMenu *helpMenu = menuBar->addMenu("&Help");
-QAction *manualAction = helpMenu->addAction("User Manual (PDF)");
-QAction *aboutAction = helpMenu->addAction("&About");
+QAction *manualAction = helpMenu->addAction("📖 User Manual (PDF)");
+QAction *checkUpdatesAction = helpMenu->addAction("🔄 Check for Updates");
+helpMenu->addSeparator();
+QAction *aboutAction = helpMenu->addAction("ℹ️ &About");
 
 QObject::connect(manualAction, &QAction::triggered, [&window]() {
     QString dir = "C:/Users/Public/AppData/Local/IPGui";
@@ -5474,6 +7805,10 @@ QObject::connect(manualAction, &QAction::triggered, [&window]() {
     QDesktopServices::openUrl(QUrl::fromLocalFile(localPath));
 });
 
+QObject::connect(checkUpdatesAction, &QAction::triggered, [&window]() {
+    checkForUpdates(&window, false); // false = not silent, show result dialog
+});
+
 QObject::connect(aboutAction, &QAction::triggered, [&window]() {
     QDialog dlg(&window);
     dlg.setWindowTitle("About");
@@ -5504,8 +7839,24 @@ QObject::connect(aboutAction, &QAction::triggered, [&window]() {
 });
 
 
-    window.resize(255, 330);
+
+    window.resize(300, 380);  // Compact initial size showing all content
     window.show();
+
+
+
+    // Ensure all modal dialogs close on app quit
+    QObject::connect(&app, &QApplication::aboutToQuit, []() {
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            if (qobject_cast<QDialog*>(w))
+                w->close();
+        }
+    });
+
+    // Check for updates on startup (silent check)
+    QTimer::singleShot(2000, [&window]() {
+        checkForUpdates(&window, true); // true = silent, only show if update available
+    });
 
     QShortcut *closeShortcut = new QShortcut(QKeySequence("Ctrl+W"), &window);
     closeShortcut->setContext(Qt::ApplicationShortcut);
@@ -5523,3 +7874,6 @@ QObject::connect(aboutAction, &QAction::triggered, [&window]() {
 
     return app.exec();
 }
+// Modern SSL Certificate Dialog - New Implementation
+// This is the complete modern version with table-based interface
+
