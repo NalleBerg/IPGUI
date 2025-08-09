@@ -1,4 +1,5 @@
 @echo off
+cls
 REM Remove old build directory
 rmdir /s /q build
 
