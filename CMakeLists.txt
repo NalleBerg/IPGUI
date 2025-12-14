@@ -9,6 +9,8 @@ set(CMAKE_PREFIX_PATH "C:/Qt/6.9.1/msvc2022_64/lib/cmake")
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)  # Add Network here
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_executable(IPGui ng.cpp appicon.rc)
 
 target_link_libraries(IPGui PRIVATE Qt6::Widgets Qt6::Network)  # Link Network
