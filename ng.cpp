@@ -7,11 +7,13 @@
 #include <objbase.h>
 #include <wtypes.h>
 #include <wincrypt.h>
+#include <shellapi.h>
 #pragma comment(lib, "wlanapi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "shell32.lib")
 
 
 #include <QApplication>
@@ -109,7 +111,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "4.0.5";
+const QString VersionNumber = "4.1.7";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Version checking function
@@ -3263,6 +3265,77 @@ void showNetworkAdaptersDialog(QWidget *parent) {
     dlg->exec();
 }
 
+// Helper function to read PMTUD (Path MTU Discovery) status from Windows Registry
+static QString getPMTUDStatus() {
+    HKEY hKey;
+    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                                L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                                0,
+                                KEY_READ,
+                                &hKey);
+    if (result != ERROR_SUCCESS) {
+        return "unknown";
+    }
+
+    DWORD value = 0;
+    DWORD valueSize = sizeof(DWORD);
+    result = RegQueryValueExW(hKey, L"EnablePMTUDiscovery", NULL, NULL, (LPBYTE)&value, &valueSize);
+    RegCloseKey(hKey);
+
+    if (result != ERROR_SUCCESS) {
+        // If the registry key doesn't exist, PMTUD is enabled by default in Windows
+        return "enabled";
+    }
+
+    switch (value) {
+        case 0:
+            return "disabled";
+        case 1:
+        case 2:
+            return "enabled";
+        default:
+            return "unknown";
+    }
+}
+
+// Helper function to set PMTUD status using reg.exe with UAC elevation
+static bool setPMTUDStatusWithUAC(bool enable) {
+    // Build the reg.exe command
+    QString command = QString("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\" /v EnablePMTUDiscovery /t REG_DWORD /d %1 /f")
+                        .arg(enable ? "1" : "0");
+    
+    // Convert to wide string
+    std::wstring wCommand = command.toStdWString();
+    
+    // Use ShellExecute with "runas" to trigger UAC elevation
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";  // This triggers UAC
+    sei.lpFile = L"cmd.exe";
+    sei.lpParameters = (L"/C " + wCommand).c_str();
+    sei.nShow = SW_HIDE;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    
+    if (!ShellExecuteExW(&sei)) {
+        DWORD error = GetLastError();
+        if (error == ERROR_CANCELLED) {
+            // User cancelled UAC prompt
+            return false;
+        }
+        return false;
+    }
+    
+    // Wait for the command to complete
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        DWORD exitCode = 0;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+        return (exitCode == 0);
+    }
+    
+    return false;
+}
+
 void showMtuDiscoveryDialog(QWidget *parent) {
     QDialog *dlg = new QDialog(parent);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -3362,6 +3435,103 @@ void showMtuDiscoveryDialog(QWidget *parent) {
     mtuLayout->addWidget(mtuSpin);
     mtuLayout->addWidget(setMtuBtn);
     layout->addLayout(mtuLayout);
+
+    // PMTUD Status Indicator
+    QString pmtudStatus = getPMTUDStatus();
+    QHBoxLayout *pmtudLayout = new QHBoxLayout();
+    pmtudLayout->addStretch();
+    
+    // Question mark icon with blue background
+    QLabel *questionMark = new QLabel("?");
+    questionMark->setStyleSheet(
+        "QLabel { "
+        "background-color: #3498db; "
+        "color: white; "
+        "border-radius: 10px; "
+        "font-weight: bold; "
+        "font-size: 10pt; "
+        "min-width: 20px; "
+        "max-width: 20px; "
+        "min-height: 20px; "
+        "max-height: 20px; "
+        "qproperty-alignment: AlignCenter; "
+        "}"
+    );
+    questionMark->setToolTip(
+        "<b>Path MTU Discovery (PMTUD)</b><br/><br/>"
+        "Automatically determines the optimal packet size to avoid fragmentation "
+        "across network paths. When enabled, your system can dynamically adjust "
+        "packet sizes for better performance and reliability."
+    );
+    
+    // Status text
+    QLabel *pmtudLabel = new QLabel();
+    if (pmtudStatus == "enabled") {
+        pmtudLabel->setText("PMTUD: ✓ Enabled");
+        pmtudLabel->setStyleSheet("QLabel { color: #27ae60; font-weight: bold; font-size: 10pt; }");
+    } else if (pmtudStatus == "disabled") {
+        pmtudLabel->setText("PMTUD: ✗ Disabled");
+        pmtudLabel->setStyleSheet("QLabel { color: #e74c3c; font-weight: bold; font-size: 10pt; }");
+    } else {
+        pmtudLabel->setText("PMTUD: ? Unknown");
+        pmtudLabel->setStyleSheet("QLabel { color: #f39c12; font-weight: bold; font-size: 10pt; }");
+    }
+    pmtudLabel->setToolTip(questionMark->toolTip());
+    
+    // Toggle button
+    QPushButton *togglePmtudBtn = new QPushButton(pmtudStatus == "enabled" ? "Disable" : "Enable");
+    togglePmtudBtn->setStyleSheet(
+        "QPushButton { background-color: #3498db; color: white; border: none; border-radius: 4px; font-weight: bold; min-width: 70px; min-height: 24px; font-size: 9pt; padding: 0 12px; } "
+        "QPushButton:hover { background-color: #2980b9; } "
+        "QPushButton:pressed { background-color: #21618c; }"
+    );
+    togglePmtudBtn->setToolTip("Toggle PMTUD on/off (requires administrator privileges)");
+    if (pmtudStatus == "unknown") {
+        togglePmtudBtn->setEnabled(false);
+    }
+    
+    pmtudLayout->addWidget(questionMark);
+    pmtudLayout->addSpacing(8);
+    pmtudLayout->addWidget(pmtudLabel);
+    pmtudLayout->addSpacing(8);
+    pmtudLayout->addWidget(togglePmtudBtn);
+    pmtudLayout->addStretch();
+    
+    // Connect toggle button
+    QObject::connect(togglePmtudBtn, &QPushButton::clicked, [=]() {
+        QString currentStatus = getPMTUDStatus();
+        bool shouldEnable = (currentStatus == "disabled");
+        
+        // Disable button during operation
+        togglePmtudBtn->setEnabled(false);
+        togglePmtudBtn->setText("Please wait...");
+        QApplication::processEvents();
+        
+        if (setPMTUDStatusWithUAC(shouldEnable)) {
+            // Update UI
+            QString newStatus = getPMTUDStatus();
+            if (newStatus == "enabled") {
+                pmtudLabel->setText("PMTUD: ✓ Enabled");
+                pmtudLabel->setStyleSheet("QLabel { color: #27ae60; font-weight: bold; font-size: 10pt; }");
+                togglePmtudBtn->setText("Disable");
+            } else if (newStatus == "disabled") {
+                pmtudLabel->setText("PMTUD: ✗ Disabled");
+                pmtudLabel->setStyleSheet("QLabel { color: #e74c3c; font-weight: bold; font-size: 10pt; }");
+                togglePmtudBtn->setText("Enable");
+            }
+            togglePmtudBtn->setEnabled(true);
+            QMessageBox::information(dlg, "PMTUD Status", 
+                QString("PMTUD has been %1. Changes take effect immediately for new connections.").arg(shouldEnable ? "enabled" : "disabled"));
+        } else {
+            // Re-enable button and restore text
+            togglePmtudBtn->setText(currentStatus == "enabled" ? "Disable" : "Enable");
+            togglePmtudBtn->setEnabled(true);
+            QMessageBox::warning(dlg, "Operation Cancelled", 
+                "PMTUD status was not changed. You may have cancelled the UAC prompt or the operation failed.");
+        }
+    });
+    layout->addLayout(pmtudLayout);
+    layout->addSpacing(10);
 
     // Buttons (modern ARP/Traceroute style)
     QHBoxLayout *btnLayout = new QHBoxLayout();
