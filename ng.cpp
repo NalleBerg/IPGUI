@@ -5782,7 +5782,7 @@ void showSslCertificateDialog(QWidget *parent) {
                 HCERTSTORE hStore = CertOpenStore(
                     CERT_STORE_PROV_SYSTEM_A,
                     0,
-                    NULL,
+                    0,
                     storeLocations[loc] | CERT_STORE_READONLY_FLAG,
                     storeNames[store]
                 );
@@ -6724,7 +6724,7 @@ QObject::connect(aboutAction, &QAction::triggered, [&window]() {
     QVBoxLayout layout(&dlg);
 
     QLabel *iconLabel = new QLabel;
-    iconLabel->setPixmap(QPixmap("ip-address.png").scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    iconLabel->setPixmap(QPixmap("ipgui_logo.png").scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     layout.addWidget(iconLabel, 0, Qt::AlignHCenter);
 
     QLabel label(
