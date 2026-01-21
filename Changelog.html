@@ -1,9 +1,16 @@
 <h3 style="text-align: center;">&nbsp;</h3>
+<h3 style="text-align: center;"><span style="color: #ff0000;">Version 4.1.8</span></h3>
+<p><strong>New in this version (21 January 2026, 16:00 GMT+1):</strong></p>
+<ul>
+<li>Fixed missing DLL error (libwinpthread-1.dll) by automatically copying required MinGW runtime DLLs during build.</li>
+<li>Fixed white-on-white text visibility issue reported by users on different Windows themes.<br />Added comprehensive application-wide color palette and stylesheet to strictly control all text and background colors.<br />Text is now consistently dark gray (#1c2833) on light backgrounds for excellent readability on all systems.</li>
+</ul>
+<h3 style="text-align: center;">&nbsp;</h3>
 <h3 style="text-align: center;"><span style="color: #ff0000;">Version 4.1.7</span></h3>
 <p><strong>New in this version (20 January 2026, 14:00 GMT+1):</strong></p>
 <ul>
 <li>Added MTU Discovery PMTUD (Path MTU Discovery) status indicator with toggle button.<br />View current PMTUD status (Enabled/Disabled) directly in the MTU Discovery dialog.<br />Toggle PMTUD on/off with UAC elevation for administrator privileges.<br />Helpful tooltip explaining what PMTUD does for non-technical users.</li>
-<li>Updated application icon from "WIA" to "IP" branding.<br />New professional logo with transparent background and gold outline.</li>
+<li>Updated application icon from a free image from the net to my own «home made» icon.<br />New professional logo with transparent background and gold outline.</li>
 <li>Migrated build system from MSVC to MinGW64.<br />Improved compatibility and eliminated compilation warnings.</li>
 <li>Improved distribution folder creation.<br />makeit.bat now copies only necessary runtime files, excluding build artifacts for cleaner distribution.</li>
 </ul>

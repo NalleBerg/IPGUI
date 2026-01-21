@@ -111,7 +111,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "4.1.7";
+const QString VersionNumber = "4.1.8";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Version checking function
@@ -6316,8 +6316,103 @@ void showPingDialog(QWidget *parent) {
     // No deleteLater needed; WA_DeleteOnClose ensures safe cleanup and parent is never affected.
 }
 
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    int argc = 0;
+    char** argv = nullptr;
+    QApplication app(argc, argv);
+#else
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+#endif
+
+    // Force application-wide color palette to prevent white-on-white issues
+    QPalette appPalette;
+    appPalette.setColor(QPalette::Window, QColor(248, 249, 250));          // #f8f9fa
+    appPalette.setColor(QPalette::WindowText, QColor(28, 40, 51));         // #1c2833 - darker
+    appPalette.setColor(QPalette::Base, QColor(236, 240, 241));            // #ecf0f1
+    appPalette.setColor(QPalette::AlternateBase, QColor(248, 249, 250));   // #f8f9fa
+    appPalette.setColor(QPalette::Text, QColor(28, 40, 51));               // #1c2833 - darker
+    appPalette.setColor(QPalette::Button, QColor(52, 73, 94));             // #34495e
+    appPalette.setColor(QPalette::ButtonText, Qt::white);
+    appPalette.setColor(QPalette::BrightText, Qt::white);
+    appPalette.setColor(QPalette::Highlight, QColor(52, 152, 219));        // #3498db
+    appPalette.setColor(QPalette::HighlightedText, Qt::white);
+    appPalette.setColor(QPalette::Link, QColor(52, 152, 219));             // #3498db
+    appPalette.setColor(QPalette::LinkVisited, QColor(155, 89, 182));      // #9b59b6
+    app.setPalette(appPalette);
+
+    // Global stylesheet for consistent appearance
+    app.setStyleSheet(
+        "* { color: #1c2833; background-color: #f8f9fa; } "
+        "QWidget { color: #1c2833; } "
+        "QLabel { color: #1c2833; background-color: transparent; } "
+        "QTextEdit, QPlainTextEdit, QTextBrowser { "
+        "    color: #1c2833; "
+        "    background-color: #ecf0f1; "
+        "    selection-color: white; "
+        "    selection-background-color: #3498db; "
+        "} "
+        "QLineEdit, QSpinBox { "
+        "    color: #1c2833; "
+        "    background-color: white; "
+        "    border: 2px solid #bdc3c7; "
+        "    selection-color: white; "
+        "    selection-background-color: #3498db; "
+        "} "
+        "QComboBox { "
+        "    color: #1c2833; "
+        "    background-color: white; "
+        "    border: 2px solid #bdc3c7; "
+        "    selection-color: white; "
+        "    selection-background-color: #3498db; "
+        "} "
+        "QComboBox QAbstractItemView { "
+        "    color: #1c2833; "
+        "    background-color: white; "
+        "    selection-color: white; "
+        "    selection-background-color: #3498db; "
+        "} "
+        "QTableWidget, QTreeWidget { "
+        "    color: #1c2833; "
+        "    background-color: white; "
+        "    alternate-background-color: #ecf0f1; "
+        "    selection-color: white; "
+        "    selection-background-color: #3498db; "
+        "} "
+        "QHeaderView::section { "
+        "    color: white; "
+        "    background-color: #34495e; "
+        "    font-weight: bold; "
+        "    border: 1px solid #2c3e50; "
+        "} "
+        "QGroupBox { "
+        "    color: #1c2833; "
+        "    background-color: transparent; "
+        "    border: 2px solid #bdc3c7; "
+        "} "
+        "QGroupBox::title { "
+        "    color: #1c2833; "
+        "    background-color: transparent; "
+        "} "
+        "QDialog { "
+        "    color: #1c2833; "
+        "    background-color: #f8f9fa; "
+        "} "
+        "QMessageBox { "
+        "    color: #1c2833; "
+        "    background-color: #f8f9fa; "
+        "} "
+        "QScrollBar:vertical, QScrollBar:horizontal { "
+        "    background-color: #ecf0f1; "
+        "} "
+        "QScrollBar::handle:vertical, QScrollBar::handle:horizontal { "
+        "    background-color: #95a5a6; "
+        "} "
+        "QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { "
+        "    background-color: #7f8c8d; "
+        "} "
+    );
 
 
     // ...reverted: using standard QMainWindow...
@@ -6450,7 +6545,7 @@ int main(int argc, char *argv[]) {
         "    font-family: 'Consolas', 'Courier New', monospace; "
         "    font-size: 10pt; "
         "    padding: 6px; "
-        "    color: #2c3e50; "
+        "    color: #1c2833; "
         "}"
     );
     layout->addWidget(infoBox);
