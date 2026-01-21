@@ -21,7 +21,8 @@ Write-Host "Deploying DLLs to: $targetDir" -ForegroundColor Cyan
 $mingwDlls = @(
     "libgcc_s_seh-1.dll",
     "libstdc++-6.dll",
-    "libwinpthread-1.dll"
+    "libwinpthread-1.dll",
+    "libmcfgthread-2.dll"
 )
 
 Write-Host "`nCopying MinGW runtime DLLs..." -ForegroundColor Yellow

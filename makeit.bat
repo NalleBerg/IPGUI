@@ -9,10 +9,11 @@ cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="C:\Qt\6.9.1\mingw_
 REM Build in Release mode
 cmake --build build --verbose
 
-REM Copy MinGW runtime DLLs first (fix for libwinpthread-1.dll error)
+REM Copy MinGW runtime DLLs first (fix for missing DLL errors)
 copy C:\mingw64\bin\libgcc_s_seh-1.dll .\build\
 copy C:\mingw64\bin\libstdc++-6.dll .\build\
 copy C:\mingw64\bin\libwinpthread-1.dll .\build\
+copy C:\mingw64\bin\libmcfgthread-2.dll .\build\
 
 REM Deploy Qt dependencies
 C:\Qt\6.9.1\mingw_64\bin\windeployqt.exe .\build\IPGUI.exe

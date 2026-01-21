@@ -111,7 +111,7 @@ inline void addCtrlWClose(QDialog *dlg) {
 
 
 //Global variables
-const QString VersionNumber = "4.1.8";
+const QString VersionNumber = "4.1.9";
 const QString html = QString("<b>Version:</b> %1<br>").arg(VersionNumber);
 
 // Version checking function
